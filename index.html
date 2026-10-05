@@ -311,6 +311,8 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.xr.enabled = true;
+renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); console.warn('WebGL context lost'); });
+renderer.domElement.addEventListener('webglcontextrestored', () => { saveGame(); location.reload(); });
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
@@ -707,8 +709,9 @@ function markGrassDirty(rec) {
       if (ch) ch.grassDirty = true;
     }
 }
+let grassCD = 0;
 function updateGrass(pcx, pcz) {
-  let budget = 1;
+  let budget = xrOn && (grassCD = (grassCD + 1) % 3) ? 0 : 1;
   for (const ch of chunks.values()) {
     const near = Math.abs(ch.cx - pcx) <= 1 && Math.abs(ch.cz - pcz) <= 1;
     if (ch.grassDirty && budget > 0) {
@@ -893,6 +896,7 @@ function disposeChunk(ch) {
   ch.disposed = true;
   chunks.delete(ckey(ch.cx, ch.cz));
 }
+let buildCD = 0;
 function updateChunks() {
   const pcx = Math.floor(P.pos.x / CHUNK), pcz = Math.floor(P.pos.z / CHUNK);
   let best = null, bd = 1e9;
@@ -901,7 +905,7 @@ function updateChunks() {
     if (d > VIEW * VIEW + 1 || d >= bd) continue;
     if (!chunks.has(ckey(pcx + dx, pcz + dz))) { bd = d; best = [pcx + dx, pcz + dz]; }
   }
-  if (best) buildChunk(best[0], best[1]);
+  if (best && (!xrOn || (buildCD = (buildCD + 1) % 4) === 0)) buildChunk(best[0], best[1]);
   for (const ch of [...chunks.values()]) {
     if (Math.abs(ch.cx - pcx) > VIEW + 1 || Math.abs(ch.cz - pcz) > VIEW + 1) disposeChunk(ch);
   }
@@ -1733,9 +1737,11 @@ const curVar = id => (varSel[id] || 0) % (DEFS[id].pal?.length || 1);
 // drawn once with a separate small renderer and cached as images.
 const thumbCache = new Map();
 let thumbR = null, thumbScene, thumbCam, thumbGlow;
+const BLANK_PNG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 function partThumb(id, v) {
   const key = id + '|' + v;
   if (thumbCache.has(key)) return thumbCache.get(key);
+  if (xrOn) return BLANK_PNG;
   if (!thumbR) {
     thumbR = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     thumbR.setPixelRatio(1); thumbR.setSize(176, 176);
@@ -3202,7 +3208,7 @@ function updateWrist(dt) {
   const d = DEFS[curItem()];
   const held = d.kind === 'empty' ? '✋ Empty hands' : `${d.icon} ${d.name}${d.pal && d.pal.length > 1 && d.kind !== 'tool' ? ' · ' + d.pal[curVar(d.id)][0] : ''}`;
   const invLine = Object.keys(RES).filter(k => k === 'wood' || k === 'stone' || k === 'petals' || inv[k] > 0).map(k => `${RES[k][0]}${creative ? '∞' : inv[k]}`).join('  ');
-  const key = [held, wristText.hint, toastTimer > 0 ? wristText.toast : '', invLine, $('clockText').textContent].join('|');
+  const key = [held, wristText.hint, toastTimer > 0 ? wristText.toast : '', invLine, $('clockText').textContent, Math.round(fpsEma / 3)].join('|');
   if (key === wristKey) return;
   wristKey = key;
   const c = wristCtx;
@@ -3210,6 +3216,7 @@ function updateWrist(dt) {
   c.fillStyle = 'rgba(255,247,234,0.94)'; roundRect(c, 4, 4, 504, 292, 26); c.fill();
   c.fillStyle = '#4a3b2f'; c.font = '800 30px Nunito, sans-serif';
   c.fillText(`${$('clockIcon').textContent} ${$('clockText').textContent}   ${$('dayText').textContent}`, 22, 46);
+  c.textAlign = 'right'; c.font = '800 20px Nunito, sans-serif'; c.fillStyle = fpsEma < 55 ? '#b4473a' : '#6a8a5a'; c.fillText(`${Math.round(fpsEma)} fps`, 490, 46); c.textAlign = 'left'; c.fillStyle = '#4a3b2f';
   c.font = '900 32px Nunito, sans-serif'; c.fillText(held, 22, 96);
   c.font = '700 24px Nunito, sans-serif'; c.fillStyle = '#8a7766';
   c.fillText(wristText.hint.slice(0, 40), 22, 140);
@@ -3393,19 +3400,30 @@ function updateXRInput(dt) {
 
 // lighter settings while in the headset so it stays smooth on a standalone Quest
 const DESKTOP_Q = { view: VIEW, grass: grassDensity, shadow: 2048, fog: [fogNear, fogFar] };
+const VR_LEVELS = [{ view: 3, grass: 0.35, fog: [60, 135] }, { view: 3, grass: 0.15, fog: [50, 120] }, { view: 2, grass: 0, fog: [40, 92] }];
+let vrLevel = 0, fpsEma = 72, slowT = 0;
 function applyQuality(vr) {
-  VIEW = vr ? 3 : DESKTOP_Q.view;
-  grassDensity = vr ? 0.4 : DESKTOP_Q.grass;
-  [fogNear, fogFar] = vr ? [60, 135] : DESKTOP_Q.fog;
+  const L = VR_LEVELS[vrLevel];
+  VIEW = vr ? L.view : DESKTOP_Q.view;
+  grassDensity = vr ? L.grass : DESKTOP_Q.grass;
+  [fogNear, fogFar] = vr ? L.fog : DESKTOP_Q.fog;
   const size = vr ? 1024 : DESKTOP_Q.shadow;
   if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.set(size, size); sun.shadow.map?.dispose(); sun.shadow.map = null; }
   for (const ch of chunks.values()) ch.grassDirty = true;
 }
+function watchFrameRate(dt) {
+  if (dt <= 0) return;
+  fpsEma += (1 / dt - fpsEma) * 0.05;
+  slowT = fpsEma < 52 ? slowT + dt : 0;
+  if (slowT > 3 && vrLevel < VR_LEVELS.length - 1) { vrLevel++; slowT = 0; applyQuality(true); toast(`🥽 Lightening graphics (level ${vrLevel + 1}/${VR_LEVELS.length})`); }
+}
 async function enterVR() {
   if (!navigator.xr) return;
   initAudio();
+  for (const d of DEF_LIST) if (d.pal) partThumb(d.id, curVar(d.id));
   try {
     renderer.xr.setFramebufferScaleFactor(0.9);
+    vrLevel = 0; fpsEma = 72; slowT = 0;
     const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
     session.addEventListener('end', () => {
       xrOn = false; vrClose(); applyQuality(false);
@@ -3416,6 +3434,9 @@ async function enterVR() {
     await renderer.xr.setSession(session);
     renderer.xr.setFoveation(1);
     xrOn = true; applyQuality(true);
+    uiMesh.visible = reticle.visible = true;
+    renderer.compile(scene, camera);
+    uiMesh.visible = UI.open; reticle.visible = false;
     $('menu').classList.add('hidden');
     P.pitch = 0;
     toast('🥽 Welcome to the valley!');
@@ -3557,7 +3578,7 @@ function frame(now) {
     updatePlayer(dt);
     updateChunks();
     updateInteraction(dt);
-    if (xrOn) updateXRInput(dt);
+    if (xrOn) { updateXRInput(dt); watchFrameRate(dt); }
     updateViewModel(dt);
     for (let i = anims.length - 1; i >= 0; i--) if (anims[i](dt)) anims.splice(i, 1);
     updateAnimals(dt);
