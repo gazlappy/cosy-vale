@@ -830,6 +830,7 @@ function isHarvested(id) {
 }
 
 function buildChunk(cx, cz) {
+  ensureGen(cx, cz);
   const N = SEG + 1, M = N + 2, x0 = cx * CHUNK, z0 = cz * CHUNK;
   const H = new Float32Array(M * M);
   for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) H[j * M + i] = heightRaw(x0 + (i - 1) * STEP, z0 + (j - 1) * STEP);
@@ -944,11 +945,13 @@ function buildChunk(cx, cz) {
   ch.sparse = buildGrass(ch, false);
 
   if (chunkDug.has(ckey(cx, cz))) buildCave(ch);
+  buildCaveDeco(ch);
   scene.add(ch.group);
   chunks.set(ckey(cx, cz), ch);
   return ch;
 }
 function disposeChunk(ch) {
+  disposeCaveDeco(ch);
   if (ch.cave) ch.cave.geometry.dispose();
   if (ch.dry) ch.dry.geometry.dispose();
   scene.remove(ch.group);
@@ -1002,13 +1005,14 @@ function refreshOpen(ix, iz) {
 function addDug(ix, iy, iz) {
   const k = dKey(ix, iy, iz);
   if (dug.has(k)) return;
-  dug.add(k);
+  dug.add(k); filledNat.delete(k);
   const ck = colKey(ix, iz); colDug.set(ck, (colDug.get(ck) || 0) + 1);
   const hk = chunkOfCol(ix, iz); if (!chunkDug.has(hk)) chunkDug.set(hk, new Set()); chunkDug.get(hk).add(k);
 }
 function removeDug(ix, iy, iz) {
   const k = dKey(ix, iy, iz);
   if (!dug.delete(k)) return;
+  if (natural.has(k)) filledNat.add(k);
   const ck = colKey(ix, iz), n = (colDug.get(ck) || 1) - 1; if (n) colDug.set(ck, n); else colDug.delete(ck);
   chunkDug.get(chunkOfCol(ix, iz))?.delete(k);
 }
@@ -1031,25 +1035,50 @@ function buildCave(ch) {
   const set = chunkDug.get(ckey(ch.cx, ch.cz));
   if (!set || !set.size) return;
   const hc = new Map(), H = (x, z) => { const k = x + ',' + z; let v = hc.get(k); if (v === undefined) hc.set(k, v = heightRaw(x, z)); return v; };
-  const pos = [], col = [], c = new THREE.Color(), e1 = new V3(), e2 = new V3(), nn = new V3();
-  const shade = (x, y, z, jit) => {
+  const pos = [], col = [], sf = [], c = new THREE.Color(), e1 = new V3(), e2 = new V3(), nn = new V3();
+  const STY = [[null, SURF.stone], [0x8e8a82, SURF.brick], [0x6f6a62, SURF.tile], [0x5e6450, SURF.stone]];
+  const shade = (x, y, z, jit, sty) => {
     const depth = H(Math.round(x / 2) * 2, Math.round(z / 2) * 2) - y;
+    if (sty) { c.setHex(STY[sty][0]).multiplyScalar(clamp(1 - depth / 60, 0.6, 1) * jit); return c; }
     c.copy(DIRT).lerp(ROCK, smooth(1.0, 3.0, depth)).lerp(ROCK2, Math.max(0, Math.sin(y * 0.9)) * 0.35 * smooth(3, 6, depth));
     c.multiplyScalar(clamp(1 - depth / 30, 0.38, 1) * jit);
     return c;
   };
-  const quad = (pts, n) => {
-    const r = mulberry32(hash2(Math.round(pts[0][0] * 7), Math.round(pts[0][1] * 7 + pts[0][2] * 3), 5))(), jit = 0.86 + r * 0.24;
+  const quad = (pts, n, sty = 0) => {
+    const r = mulberry32(hash2(Math.round(pts[0][0] * 7), Math.round(pts[0][1] * 7 + pts[0][2] * 3), 5))(), jit = (sty === 3 ? 0.7 : 0.86) + r * 0.24;
     for (const [a, b, d] of [[0, 1, 2], [0, 2, 3]]) {
       let A = pts[a], Bp = pts[b], Cp = pts[d];
       e1.set(Bp[0] - A[0], Bp[1] - A[1], Bp[2] - A[2]); e2.set(Cp[0] - A[0], Cp[1] - A[1], Cp[2] - A[2]); nn.crossVectors(e1, e2);
       if (nn.x * n[0] + nn.y * n[1] + nn.z * n[2] < 0) [Bp, Cp] = [Cp, Bp];
-      for (const P3 of [A, Bp, Cp]) { pos.push(...P3); shade(P3[0], P3[1], P3[2], jit); col.push(c.r, c.g, c.b); }
+      for (const P3 of [A, Bp, Cp]) { pos.push(...P3); shade(P3[0], P3[1], P3[2], jit, sty); col.push(c.r, c.g, c.b); sf.push(STY[sty][1]); }
+    }
+  };
+  // a slope (natural) or a flight of four steps (dungeon) across one block
+  const ramp = (rp, x0, y0, z0) => {
+    const tOf = (x, z) => rp.dx > 0 ? (x - x0) / 2 : rp.dx < 0 ? (x0 + 2 - x) / 2 : rp.dz > 0 ? (z - z0) / 2 : (z0 + 2 - z) / 2;
+    const pt = (t, side, y) => { const along = rp.dx ? [rp.dx > 0 ? x0 + t * 2 : x0 + 2 - t * 2, z0 + side * 2] : [x0 + side * 2, rp.dz > 0 ? z0 + t * 2 : z0 + 2 - t * 2]; return [along[0], y, along[1]]; };
+    // where the space beside or beyond the slope is open, close off the wedge underneath it
+    const ix = x0 / 2, iy = y0 / 2, iz = z0 / 2, sty = rp.st ? 1 : 0;
+    for (const [sx, sz] of rp.dx ? [[0, 1], [0, -1]] : [[1, 0], [-1, 0]]) {
+      if (!isDug(ix + sx, iy, iz + sz)) continue;
+      const side = sx > 0 || sz > 0 ? 1 : 0;
+      quad([pt(0, side, y0), pt(1, side, y0), pt(1, side, rp.b), pt(0, side, rp.a)], [sx, 0, sz], sty);
+    }
+    if (isDug(ix + rp.dx, iy, iz + rp.dz)) quad([pt(1, 0, y0), pt(1, 1, y0), pt(1, 1, rp.b), pt(1, 0, rp.b)], [rp.dx, 0, rp.dz], sty);
+    if (!rp.st) {
+      const P4 = [[x0, z0], [x0 + 2, z0], [x0 + 2, z0 + 2], [x0, z0 + 2]].map(([x, z]) => [x, rp.a + (rp.b - rp.a) * tOf(x, z), z]);
+      quad(P4, [0, 1, 0]); return;
+    }
+    const hs = (rp.b - rp.a) / 4, back = [-rp.dx, 0, -rp.dz];
+    for (let i = 0; i < 4; i++) {
+      const y = rp.a + hs * (i + 0.5), yl = i ? rp.a + hs * (i - 0.5) : y0;
+      quad([pt(i / 4, 0, y), pt((i + 1) / 4, 0, y), pt((i + 1) / 4, 1, y), pt(i / 4, 1, y)], [0, 1, 0], 2);
+      if (y > yl + 0.01) quad([pt(i / 4, 0, yl), pt(i / 4, 1, yl), pt(i / 4, 1, y), pt(i / 4, 0, y)], back, 1);
     }
   };
   const dry = [], dryCols = new Set();
   for (const k of set) {
-    const [ix, iy, iz] = k.split(',').map(Number), x0 = ix * 2, y0 = iy * 2, z0 = iz * 2, y1 = y0 + 2;
+    const [ix, iy, iz] = k.split(',').map(Number), x0 = ix * 2, y0 = iy * 2, z0 = iz * 2, y1 = y0 + 2, dun = dunBlocks.has(k);
     if ((iy === -1 || iy === 0) && !dryCols.has(ix + ',' + iz)) { dryCols.add(ix + ',' + iz); dry.push(x0, 0.06, z0, x0, 0.06, z0 + 2, x0 + 2, 0.06, z0 + 2, x0, 0.06, z0, x0 + 2, 0.06, z0 + 2, x0 + 2, 0.06, z0); }
     // side walls: the solid neighbour's face, cut off at the ground surface along the shared edge
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -1059,17 +1088,21 @@ function buildCave(ch) {
       else { const z = dz > 0 ? z0 + 2 : z0; pA = [x0, z]; pB = [x0 + 2, z]; }
       const tA = Math.min(y1, H(pA[0], pA[1])), tB = Math.min(y1, H(pB[0], pB[1]));
       if (tA <= y0 + 0.01 && tB <= y0 + 0.01) continue;
-      quad([[pA[0], y0, pA[1]], [pB[0], y0, pB[1]], [pB[0], Math.max(tB, y0), pB[1]], [pA[0], Math.max(tA, y0), pA[1]]], [-dx, 0, -dz]);
+      quad([[pA[0], y0, pA[1]], [pB[0], y0, pB[1]], [pB[0], Math.max(tB, y0), pB[1]], [pA[0], Math.max(tA, y0), pA[1]]], [-dx, 0, -dz], cracks.has(dKey(ix + dx, iy, iz + dz)) ? 3 : dun ? 1 : 0);
     }
-    if (!isDug(ix, iy - 1, iz)) quad([[x0, y0, z0], [x0 + 2, y0, z0], [x0 + 2, y0, z0 + 2], [x0, y0, z0 + 2]], [0, 1, 0]);
+    if (!isDug(ix, iy - 1, iz)) {
+      const rp = ramps.get(colKey(ix, iz));
+      if (rp && Math.abs(rp.a - y0) < 0.01) ramp(rp, x0, y0, z0);
+      else quad([[x0, y0, z0], [x0 + 2, y0, z0], [x0 + 2, y0, z0 + 2], [x0, y0, z0 + 2]], [0, 1, 0], dun ? 2 : 0);
+    }
     const [lo] = colRange(ix, iz);
-    if (!isDug(ix, iy + 1, iz) && y1 < lo - 0.05) quad([[x0, y1, z0], [x0 + 2, y1, z0], [x0 + 2, y1, z0 + 2], [x0, y1, z0 + 2]], [0, -1, 0]);
+    if (!isDug(ix, iy + 1, iz) && y1 < lo - 0.05) quad([[x0, y1, z0], [x0 + 2, y1, z0], [x0 + 2, y1, z0 + 2], [x0, y1, z0 + 2]], [0, -1, 0], dun ? 1 : 0);
   }
   if (!pos.length) return;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(pos.length / 3).fill(SURF.stone), 1));
+  g.setAttribute('surf', new THREE.Float32BufferAttribute(sf, 1));
   g.computeVertexNormals(); g.computeBoundingSphere();
   const m = new THREE.Mesh(g, matVC);
   m.castShadow = m.receiveShadow = true; m.userData.kind = 'cave';
@@ -1100,6 +1133,7 @@ function digBlock(ix, iy, iz) {
   if (iy * 2 + 2 > lo) for (let L = iy; L <= l1; L++) addDug(ix, L, iz);
   else addDug(ix, iy, iz);
   refreshDigArea(ix, iz, refreshOpen(ix, iz));
+  if (cracks.has(dKey(ix, iy, iz))) for (const ch of chunks.values()) buildCracks(ch);
   dirty = true;
   return true;
 }
@@ -1155,7 +1189,7 @@ function caveGround(x, z, yRef) {
   const top = yRef + STEP_H, hL = Math.floor(h / 2);
   let L = Math.min(Math.floor(top / 2), hL);
   if (Math.floor(top / 2) > hL && !isDug(ix, hL, iz)) return h;
-  for (; L >= DIG_MIN_LAYER - 1; L--) if (!isDug(ix, L, iz)) return Math.min(L * 2 + 2, h);
+  for (; L >= DIG_MIN_LAYER - 1; L--) if (!isDug(ix, L, iz)) { const g = Math.min(L * 2 + 2, h); return rampY(ix, iz, x, z, g) ?? g; }
   return -1e9;
 }
 function addVoxelBoxes(x, z, y, out) {
@@ -1181,6 +1215,510 @@ function undergroundDepth(pos) {
 const caveLight = new THREE.PointLight(0xffc88a, 0, 14, 1.6);
 scene.add(caveLight);
 let caveF = 0;
+
+// ---------------------------------------------------------------- natural caves, dungeons & secrets
+// Every chunk quietly decides what lies beneath it from the world seed: winding tunnels (some opening on
+// hillsides), caverns full of stalagmites, glowing crystals or mushrooms, sealed geodes, and now and then a
+// ruined dungeon. None of it is saved - it regrows from the seed - only blocks the player fills back in,
+// chests opened and places discovered are remembered.
+const natural = new Set(), filledNat = new Set(save?.filledNat || []), looted = new Set(save?.looted || []), found = new Set(save?.found || []);
+const genDone = new Set(), ramps = new Map(), dunBlocks = new Set(), cracks = new Set(), genDeco = new Map(), areas = [];
+const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+const rangeCache = new Map();
+function colLo(ix, iz) {
+  const k = colKey(ix, iz);
+  let v = rangeCache.get(k);
+  if (!v) { if (rangeCache.size > 80000) rangeCache.clear(); rangeCache.set(k, v = colRange(ix, iz)); }
+  return v;
+}
+const roofOK = (ix, iy, iz) => iy * 2 + 2 <= colLo(ix, iz)[0] - 1.5;
+const decoAt = (x, z) => {
+  const k = ckey(Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+  let d = genDeco.get(k);
+  if (!d) genDeco.set(k, d = { ents: [], pieces: [], lights: [], worms: [], pools: [], creatures: [], cracks: [] });
+  return d;
+};
+// floor height on a slope or stair block, or null if the column has none
+function rampY(ix, iz, x, z, base) {
+  const rp = ramps.get(colKey(ix, iz));
+  if (!rp || Math.abs(base - rp.a) > 0.01) return null;
+  const fx = x / 2 - ix, fz = z / 2 - iz;
+  const t = clamp(rp.dx > 0 ? fx : rp.dx < 0 ? 1 - fx : rp.dz > 0 ? fz : 1 - fz, 0, 1);
+  return rp.a + (rp.b - rp.a) * t;
+}
+
+function carve(G, ix, iy, iz, dun) {
+  if (!G.inB(ix, iz) || iy <= DIG_MIN_LAYER) return false;
+  const k = dKey(ix, iy, iz);
+  natural.add(k);
+  if (dun) dunBlocks.add(k);
+  if (!filledNat.has(k)) addDug(ix, iy, iz);
+  G.cols.add(colKey(ix, iz));
+  return true;
+}
+const R = n => (Math.random() * (n + 1)) | 0;
+function ent(G, m, x, y, z, s, extra) {
+  decoAt(x, z).ents.push({ id: 'g' + G.ck + ':' + (G.n++), m, kind: CAVE_MODELS[m].kind, x, y, z, s, r: G.rng() * 6.28, hp: CAVE_MODELS[m].hp, col: 0xffffff, ...extra });
+}
+function gpiece(G, id, x, y, z, rot, extra) {
+  decoAt(x, z).pieces.push({ id, x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000, z: Math.round(z * 1000) / 1000, rot, v: 0, gid: 'p' + G.ck + ':' + (G.n++), ...extra });
+}
+const facing = (fx, fz) => Math.atan2(fx, fz);
+
+// a slope down from the surface: an open-air entrance block, then one layer lower per block
+function descent(G, ex, ez, d, n, dun) {
+  const [fx, fz] = DIRS[d], [lo0, hi0] = colLo(ex, ez), l0 = Math.floor(lo0 / 2), l1 = Math.floor((hi0 - 0.001) / 2);
+  for (let L = l0; L <= l1; L++) carve(G, ex, L, ez, dun);
+  // the entrance slopes from the ground behind it down to the first full block
+  const bx = fx > 0 ? ex * 2 : fx < 0 ? ex * 2 + 2 : null, bz = fz > 0 ? ez * 2 : fz < 0 ? ez * 2 + 2 : null;
+  const back = bx !== null ? (heightRaw(bx, ez * 2) + heightRaw(bx, ez * 2 + 2)) / 2 : (heightRaw(ex * 2, bz) + heightRaw(ex * 2 + 2, bz)) / 2;
+  ramps.set(colKey(ex, ez), { dx: -fx, dz: -fz, a: l0 * 2, b: Math.max(l0 * 2 + 0.2, back), st: dun });
+  let ix = ex, iz = ez;
+  for (let k = 1; k <= n; k++) {
+    ix += fx; iz += fz;
+    const F = l0 - k, [lo, hi] = colLo(ix, iz);
+    const top = (F + 3) * 2 > lo - 1.5 ? Math.floor((hi - 0.001) / 2) : F + 2;
+    for (let L = F; L <= top; L++) carve(G, ix, L, iz, dun);
+    ramps.set(colKey(ix, iz), { dx: -fx, dz: -fz, a: F * 2, b: F * 2 + 2, st: dun });
+  }
+  return { ix, iz, L: l0 - n };
+}
+function descentOK(G, ex, ez, d, n) {
+  const [fx, fz] = DIRS[d];
+  for (let k = -1; k <= n + 3; k++) {
+    const ix = ex + fx * k, iz = ez + fz * k;
+    if (!G.inB(ix, iz) || colLo(ix, iz)[0] < 2.5 || colHasDug(ix, iz) || ramps.has(colKey(ix, iz))) return false;
+    if (pieces.some(p => !p.gen && Math.abs(p.x - ix * 2 - 1) < 8 && Math.abs(p.z - iz * 2 - 1) < 8)) return false;
+  }
+  const [lo, hi] = colLo(ex, ez);
+  return lo > 3 && hi - lo < 1.3;
+}
+
+// a meandering tunnel two blocks tall, sloping up or down a layer at a time
+function worm(G, ix, L, iz, d, steps, o = {}) {
+  const r = G.rng;
+  let lastRamp = -9;
+  for (let s = 0; s < steps; s++) {
+    if (s - lastRamp > 1 && r() < 0.22) d = (d + (r() < 0.5 ? 1 : 3)) % 4;
+    const [fx, fz] = DIRS[d], nx = ix + fx, nz = iz + fz;
+    if (!G.inB(nx, nz)) break;
+    let slope = 0;
+    if (s - lastRamp > 2 && s > 1 && !colHasDug(nx, nz) && r() < (o.slope ?? 0.14)) slope = r() < (o.down ?? 0.6) && L - 1 > DIG_MIN_LAYER + 2 ? -1 : 1;
+    if (slope < 0) {
+      if (!roofOK(nx, L, nz)) break;
+      carve(G, nx, L - 1, nz); carve(G, nx, L, nz);
+      ramps.set(colKey(nx, nz), { dx: -fx, dz: -fz, a: (L - 1) * 2, b: L * 2 });
+      L--; lastRamp = s;
+    } else if (slope > 0) {
+      if (!roofOK(nx, L + 2, nz) || !roofOK(nx + fx, L + 2, nz + fz)) break;
+      carve(G, nx, L, nz); carve(G, nx, L + 1, nz);
+      ramps.set(colKey(nx, nz), { dx: fx, dz: fz, a: L * 2, b: L * 2 + 2 });
+      L++; lastRamp = s;
+    } else {
+      if (!roofOK(nx, L + 1, nz)) break;
+      carve(G, nx, L, nz); carve(G, nx, L + 1, nz);
+      if (s - lastRamp > 1 && r() < (o.wide ?? 0.3)) {
+        const [sx, sz] = DIRS[(d + 1) % 4], w = r() < 0.5 ? 1 : -1, wx = nx + sx * w, wz = nz + sz * w;
+        if (!ramps.has(colKey(wx, wz)) && roofOK(wx, L + 1, wz)) { carve(G, wx, L, wz); carve(G, wx, L + 1, wz); }
+      }
+      if (r() < 0.05) {
+        const fy = L * 2;
+        ent(G, 'stalag', nx * 2 + 0.5 + r(), fy, nz * 2 + 0.5 + r(), 0.4 + r() * 0.4);
+      }
+    }
+    ix = nx; iz = nz;
+  }
+  return { ix, iz, L, d };
+}
+
+const CRYSTAL_COLS = [0xb87cff, 0x6ff0ff, 0x6fff9a, 0xff7ab8, 0xffc04a];
+const SHROOM_COLS = [0x5ff2d8, 0x6fb8ff, 0xc48aff, 0xff8fd8];
+// a big open space with a flat floor and a domed ceiling, dressed according to its type
+function cavern(G, cx, L, cz, rx, rz, hy, type) {
+  const r = G.rng, cells = [];
+  for (let dz = -rz; dz <= rz; dz++) for (let dx = -rx; dx <= rx; dx++) {
+    const e = (dx / (rx + 0.5)) ** 2 + (dz / (rz + 0.5)) ** 2 + (r() - 0.5) * 0.25;
+    if (e > 1) continue;
+    const ix = cx + dx, iz = cz + dz;
+    if (!G.inB(ix, iz) || ramps.has(colKey(ix, iz))) continue;
+    let layers = 2 + Math.round((hy - 2) * (1 - e));
+    while (layers >= 2 && !roofOK(ix, L + layers - 1, iz)) layers--;
+    if (layers < 2) continue;
+    for (let y = 0; y < layers; y++) carve(G, ix, L + y, iz);
+    cells.push({ ix, iz, x: ix * 2 + 1, z: iz * 2 + 1, fy: L * 2, cy: (L + layers) * 2, e });
+  }
+  if (cells.length < 6) return null;
+  const inner = cells.filter(c => c.e < 0.55), any = a => a[(r() * a.length) | 0];
+  const X0 = (cx - rx) * 2, X1 = (cx + rx + 1) * 2, Z0 = (cz - rz) * 2, Z1 = (cz + rz + 1) * 2, Y0 = L * 2 - 1, Y1 = (L + hy) * 2;
+  const area = msg => areas.push({ id: 'a' + G.ck + ':' + (G.n++), x0: X0, x1: X1, y0: Y0, y1: Y1, z0: Z0, z1: Z1, msg });
+  for (const c of cells) {
+    if (r() < 0.16) ent(G, 'stalag', c.x + (r() - 0.5) * 1.4, c.fy, c.z + (r() - 0.5) * 1.4, 0.5 + r() * 0.9);
+    if (r() < 0.2) ent(G, 'stalac', c.x + (r() - 0.5) * 1.4, c.cy, c.z + (r() - 0.5) * 1.4, 0.4 + r() * 0.9);
+  }
+  if (type === 'crystal' || type === 'geode') {
+    const col = CRYSTAL_COLS[(r() * CRYSTAL_COLS.length) | 0];
+    for (const c of cells) {
+      if (r() < (type === 'geode' ? 0.9 : 0.5)) ent(G, 'crystal', c.x + (r() - 0.5) * 1.2, c.fy, c.z + (r() - 0.5) * 1.2, 0.8 + r() * 1.3, { col });
+      if (r() < (type === 'geode' ? 0.8 : 0.25)) ent(G, 'crystalDown', c.x + (r() - 0.5) * 1.2, c.cy, c.z + (r() - 0.5) * 1.2, 0.6 + r() * 0.8, { col });
+    }
+    const c = any(inner.length ? inner : cells);
+    decoAt(c.x, c.z).lights.push([c.x, c.fy + 1.6, c.z, col]);
+    area(type === 'geode' ? '💎 You broke into a hidden geode!' : '💎 A crystal cavern glitters in the dark');
+  } else if (type === 'grotto') {
+    const col = SHROOM_COLS[(r() * SHROOM_COLS.length) | 0];
+    for (const c of cells) {
+      if (r() < 0.45) ent(G, 'shroom', c.x + (r() - 0.5) * 1.4, c.fy, c.z + (r() - 0.5) * 1.4, 0.6 + r() * 0.9, { col });
+      if (r() < 0.07 && c.e < 0.7) ent(G, 'shroom', c.x, c.fy, c.z, 2.6 + r() * 1.6, { col });
+      const w = decoAt(c.x, c.z).worms;
+      for (let i = 0; i < 7; i++) w.push(c.x + (r() - 0.5) * 2, c.cy - 0.04, c.z + (r() - 0.5) * 2);
+    }
+    const c = any(inner.length ? inner : cells);
+    decoAt(c.x, c.z).lights.push([c.x, c.fy + 1.2, c.z, col]);
+    area('🍄 A glowing mushroom grotto — glow-worms twinkle on the ceiling');
+  } else if (type === 'hoard') {
+    const c = any(inner.length ? inner : cells);
+    for (const h of cells) if (h.e < 0.75 && r() < 0.8) ent(G, 'hoard', h.x + (r() - 0.5) * 1.2, h.fy, h.z + (r() - 0.5) * 1.2, 0.7 + r() * 0.8, { col: r() < 0.5 ? 0xf2c84a : 0xe8b030 });
+    decoAt(c.x, c.z).creatures.push({ type: 'dragon', x: c.x, y: c.fy + 0.3, z: c.z, yaw: r() * 6.28, v: (r() * 5) | 0, sleeper: true, name: ['Smoulder', 'Ember', 'Old Grumbleflame', 'Cinders'][(r() * 4) | 0] });
+    decoAt(c.x, c.z).lights.push([c.x, c.fy + 2.5, c.z, 0xffb050]);
+    area('🐉 …is that a sleeping dragon? On a pile of gold?!');
+  }
+  if (type === 'plain' && r() < 0.35 && inner.length) {
+    const c = any(inner);
+    ent(G, 'fossil', c.x, c.fy, c.z, 0.9 + r() * 0.3);
+    area('🦴 Something enormous is buried here… a fossil!');
+  }
+  if ((type === 'plain' || type === 'grotto') && r() < 0.35 && inner.length) {
+    const c = any(inner);
+    decoAt(c.x, c.z).pools.push([c.x, c.fy + 0.04, c.z, 1.3 + r() * 0.9, type === 'grotto' ? 0x4fd8e8 : 0x3a8ab8]);
+  }
+  return cells;
+}
+
+// ruined halls: a stair down, a torch-lit hall, side rooms, and one room bricked up behind a cracked wall
+function dungeon(G) {
+  const r = G.rng, bx = G.bx, bz = G.bz;
+  for (let t = 0; t < 14; t++) {
+    const ex = bx + 4 + ((r() * 16) | 0), ez = bz + 4 + ((r() * 16) | 0), d = (r() * 4) | 0;
+    const [fx, fz] = DIRS[d], [rx, rz] = DIRS[(d + 1) % 4];
+    const HL = 5 + ((r() * 3) | 0), hw = r() < 0.5 ? 2 : 3;
+    if (!descentOK(G, ex, ez, d, 2)) continue;
+    const W = (u, v) => [ex + fx * u + rx * v, ez + fz * u + rz * v];
+    // how deep it must sit to keep a solid roof over all of it
+    let minLo = 1e9, ok = true;
+    for (let u = 3; u <= 20 + HL && ok; u++) for (let v = -hw - 6; v <= hw + 6; v++) {
+      const [ix, iz] = W(u, v);
+      if (!G.inB(ix, iz) || colHasDug(ix, iz)) { ok = false; break; }
+      minLo = Math.min(minLo, colLo(ix, iz)[0]);
+    }
+    if (!ok) continue;
+    const l0 = Math.floor(colLo(ex, ez)[0] / 2), Fh = Math.min(l0 - 4, Math.floor((minLo - 1.5) / 2) - 2), n = l0 - Fh;
+    if (n > 11 || Fh < DIG_MIN_LAYER + 3) continue;
+    let ok2 = true;
+    for (let k = 1; k <= n; k++) { const [ix, iz] = W(k, 0); if (!G.inB(ix, iz) || colLo(ix, iz)[0] < 2.5 || colHasDug(ix, iz) || pieces.some(p => !p.gen && Math.abs(p.x - ix * 2 - 1) < 8 && Math.abs(p.z - iz * 2 - 1) < 8)) ok2 = false; }
+    if (!ok2) continue;
+
+    descent(G, ex, ez, d, n, true);
+    const fy = Fh * 2, C = (u, v, du = 0, dv = 0) => { const [ix, iz] = W(u, v); return [ix * 2 + 1 + fx * du + rx * dv, iz * 2 + 1 + fz * du + rz * dv]; };
+    const room = (u0, u1, v0, v1) => { for (let u = u0; u <= u1; u++) for (let v = v0; v <= v1; v++) { const [ix, iz] = W(u, v); carve(G, ix, Fh, iz, true); carve(G, ix, Fh + 1, iz, true); } };
+    // ruined pillars either side of the way in
+    for (const s of [-1, 1]) { const [x, z] = C(0, 0, -0.6, s * 1.3); gpiece(G, 'column', x, heightAt(x, z) - 0.05, z, 0); }
+    { const [x, z] = C(Math.ceil(n / 2), 0, 0, 0.98); gpiece(G, 'walltorch', x, (l0 - Math.ceil(n / 2)) * 2 + 2.3, z, facing(-rx, -rz)); }
+    const h0 = n + 3, h1 = n + 2 + HL;
+    room(n + 1, n + 2, 0, 0);
+    room(h0, h1, -hw, hw);
+    for (const s of [-1, 1]) for (const u of [h0 + 1, h1 - 1]) { const [x, z] = C(u, s * (hw - 1)); gpiece(G, 'brazier', x, fy, z, 0, { v: 0 }); }
+    for (let u = h0; u <= h1; u += 2) for (const s of [-1, 1]) {
+      if (u === h0 + (HL >> 1)) continue; const [x, z] = C(u, s * hw, 0, s * 0.98); gpiece(G, 'walltorch', x, fy + 2.3, z, facing(-rx * s, -rz * s)); }
+    for (const s of [-1, 1]) { const [x, z] = C(h1, s * 1, 0.4); gpiece(G, 'banner', x, fy, z, facing(-fx, -fz), { v: (r() * 5) | 0 }); }
+    { const [x, z] = C(h0 + 1, 0); gpiece(G, 'chest', x, fy, z, facing(-fx, -fz), { loot: 'chest', mimic: r() < 0.3 }); }
+    { const [hx, hz] = W(h0, -hw), [hx2, hz2] = W(h1, hw); areas.push({ id: 'a' + G.ck + ':hall', x0: Math.min(hx, hx2) * 2, x1: Math.max(hx, hx2) * 2 + 2, z0: Math.min(hz, hz2) * 2, z1: Math.max(hz, hz2) * 2 + 2, y0: fy - 1, y1: fy + 4, msg: '🏰 Ancient dungeon halls… mind your step' }); }
+
+    // side rooms: left, right and beyond the far wall; one of them is sealed behind a cracked wall
+    const kinds = ['library', 'store', 'treasure'].sort(() => r() - 0.5), secret = (r() * 3) | 0;
+    const exits = [
+      { u: h0 + (HL >> 1), v: -hw - 1, du: 0, dv: -1 },
+      { u: h0 + (HL >> 1), v: hw + 1, du: 0, dv: 1 },
+      { u: h1 + 1, v: 0, du: 1, dv: 0 },
+    ];
+    exits.forEach((E, i) => {
+      const len = 2 + ((r() * 2) | 0), kind = i === secret ? 'treasure' : kinds[i] === 'treasure' ? 'store' : kinds[i];
+      for (let k = 0; k < len; k++) {
+        const [ix, iz] = W(E.u + E.du * k, E.v + E.dv * k);
+        if (i === secret && k === len - 1) {
+          cracks.add(dKey(ix, Fh, iz)); cracks.add(dKey(ix, Fh + 1, iz));
+          const ox = fx * E.du + rx * E.dv, oz = fz * E.du + rz * E.dv, x = ix * 2 + 1 - ox, z = iz * 2 + 1 - oz;
+          for (const L of [Fh, Fh + 1]) decoAt(x, z).cracks.push([x, L * 2 + 1, z, -ox, -oz, dKey(ix, L, iz)]);
+        }
+        else { carve(G, ix, Fh, iz, true); carve(G, ix, Fh + 1, iz, true); }
+      }
+      const cu = E.u + E.du * (len + 1), cv = E.v + E.dv * (len + 1);
+      room(cu - 1, cu + 1, cv - 1, cv + 1);
+      const into = [-(fx * E.du + rx * E.dv), -(fz * E.du + rz * E.dv)];
+      const [rcx, rcz] = C(cu, cv), back = C(cu + E.du, cv + E.dv, E.du * 0.72, E.dv * 0.72), [ix0, iz0] = W(cu - 1, cv - 1), [ix1, iz1] = W(cu + 1, cv + 1);
+      const ar = msg => areas.push({ id: 'a' + G.ck + ':r' + i, x0: Math.min(ix0, ix1) * 2, x1: Math.max(ix0, ix1) * 2 + 2, z0: Math.min(iz0, iz1) * 2, z1: Math.max(iz0, iz1) * 2 + 2, y0: fy - 1, y1: fy + 4, msg });
+      const side = s => C(cu, cv, E.dv * s * 2.72, -E.du * s * 2.72);
+      if (kind === 'library') {
+        gpiece(G, 'shelf', back[0], fy, back[1], facing(rcx - back[0], rcz - back[1]));
+        for (const s of [-1, 1]) { const [x, z] = side(s); gpiece(G, 'shelf', x, fy, z, facing(rcx - x, rcz - z)); }
+        gpiece(G, 'candelabra', rcx, fy, rcz, 0);
+        decoAt(rcx, rcz).creatures.push({ type: 'ghost', x: rcx + 0.8, y: fy, z: rcz + 0.8, yaw: 0, v: 0, name: ['Lady Wisteria', 'Sir Reginald', 'Old Bartholomew', 'Miss Pennyworth'][(r() * 4) | 0] });
+        ar('📚 A forgotten library. Someone — something — is still reading…');
+      } else if (kind === 'store') {
+        gpiece(G, 'barrel', back[0], fy, back[1], 0);
+        for (const s of [-1, 1]) { const [x, z] = side(s); gpiece(G, s < 0 ? 'crate' : 'barrel', x, fy, z, r() * 3); }
+        gpiece(G, 'chest', rcx, fy, rcz, facing(into[0], into[1]), { loot: 'chest', mimic: r() < 0.5 });
+        gpiece(G, 'walltorch', back[0] - into[0] * 0.25, fy + 2.3, back[1] - into[1] * 0.25, facing(into[0], into[1]));
+      } else {
+        gpiece(G, 'chest', back[0] + into[0] * 0.25, fy, back[1] + into[1] * 0.25, facing(into[0], into[1]), { loot: i === secret ? 'secret' : 'chest' });
+        for (let k = 0; k < 7; k++) ent(G, 'hoard', rcx + (r() - 0.5) * 4.6, fy, rcz + (r() - 0.5) * 4.6, 0.6 + r() * 0.6, { col: r() < 0.5 ? 0xf2c84a : 0xe8b030 });
+        gpiece(G, 'candelabra', rcx, fy, rcz, 0);
+        if (i === secret) ar('🗝️ A secret treasure room!');
+      }
+    });
+    return true;
+  }
+  return false;
+}
+
+function genChunk(cx, cz) {
+  const ck = ckey(cx, cz);
+  if (genDone.has(ck)) return;
+  genDone.add(ck);
+  if (Math.hypot(cx * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2) < 90) return;
+  const bx = cx * SEG, bz = cz * SEG;
+  const G = { rng: mulberry32(hash2(cx, cz, SEED + 7771)), ck, n: 0, bx, bz, cols: new Set(), inB: (ix, iz) => ix >= bx - 22 && ix < bx + SEG + 22 && iz >= bz - 22 && iz < bz + SEG + 22 };
+  const r = G.rng, rcol = () => [bx + 2 + ((r() * (SEG - 4)) | 0), bz + 2 + ((r() * (SEG - 4)) | 0)];
+  const pickType = depth => r() < 0.07 && depth > 12 ? 'hoard' : depth > 9 && r() < 0.45 ? 'crystal' : r() < 0.4 ? 'grotto' : 'plain';
+  const endCavern = (w, chance) => {
+    if (r() > chance) return;
+    const depth = colLo(w.ix, w.iz)[0] - w.L * 2, type = pickType(depth), big = type === 'hoard';
+    cavern(G, w.ix, w.L, w.iz, (big ? 4 : 2) + ((r() * 3) | 0), (big ? 4 : 2) + ((r() * 3) | 0), big ? 4 : 2 + ((r() * 3) | 0), type);
+  };
+  if (r() < 0.09 && dungeon(G)) { /* the dungeon takes over this chunk's underground */ }
+  else {
+    // a cave mouth on the hillside that winds down into the dark
+    if (r() < 0.3) for (let t = 0; t < 10; t++) {
+      const [ex, ez] = rcol(), d = (r() * 4) | 0;
+      if (!descentOK(G, ex, ez, d, 3)) continue;
+      const e = descent(G, ex, ez, d, 2 + ((r() * 2) | 0), false);
+      const [fx, fz] = DIRS[d], [sx, sz] = DIRS[(d + 1) % 4];
+      // a tumble of boulders around the mouth
+      for (const [a, b, sc] of [[-0.6, 1.9, 1.3], [-0.6, -1.9, 1.1], [-2.2, 0.8, 1.5], [-2.0, -1.2, 0.9], [0.8, 2.3, 0.8], [1.6, -2.4, 1.0]]) {
+        const x = ex * 2 + 1 + fx * a + sx * b, z = ez * 2 + 1 + fz * a + sz * b;
+        ent(G, 'boulder', x, heightAt(x, z) - 0.25, z, sc * (0.8 + r() * 0.5), { sy: 0.7 + r() * 0.4 });
+      }
+      if (roofOK(e.ix + fx, e.L + 1, e.iz + fz)) {
+        const w = worm(G, e.ix, e.L, e.iz, d, 16 + ((r() * 20) | 0), { down: 0.85, slope: 0.18 });
+        endCavern(w, 0.55);
+      }
+      break;
+    }
+    // tunnels deeper down
+    const nw = r() < 0.65 ? 1 + (r() < 0.4 ? 1 : 0) : 0;
+    for (let i = 0; i < nw; i++) {
+      const [ix, iz] = rcol(), lo = colLo(ix, iz)[0], L = Math.floor(lo / 2) - 3 - ((r() * 9) | 0);
+      if (L < DIG_MIN_LAYER + 4 || !roofOK(ix, L + 1, iz) || colHasDug(ix, iz)) continue;
+      carve(G, ix, L, iz); carve(G, ix, L + 1, iz);
+      const w = worm(G, ix, L, iz, (r() * 4) | 0, 14 + ((r() * 26) | 0));
+      endCavern(w, 0.5);
+      if (r() < 0.5) worm(G, ix, L, iz, (r() * 4) | 0, 8 + ((r() * 14) | 0));
+    }
+    // sealed geodes, only ever found by digging
+    if (r() < 0.16) {
+      const [ix, iz] = rcol(), lo = colLo(ix, iz)[0], L = Math.floor(lo / 2) - 4 - ((r() * 5) | 0);
+      if (L > DIG_MIN_LAYER + 3 && roofOK(ix, L + 2, iz) && !colHasDug(ix, iz)) cavern(G, ix, L, iz, 1, 1, 2, 'geode');
+    }
+  }
+  for (const k of G.cols) { const [ix, iz] = k.split(',').map(Number); refreshOpen(ix, iz); }
+}
+function ensureGen(cx, cz) {
+  for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) genChunk(cx + dx, cz + dz);
+}
+
+// ---- what lives down there
+const caveRockMat = matFlat;
+const crystalMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
+crystalMat.color.setScalar(2.2);
+const shroomGlowMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
+shroomGlowMat.color.setScalar(1.8);
+const goldMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.85, roughness: 0.32, flatShading: true, emissive: 0x2a1a00 });
+const spiritMat = new THREE.MeshStandardMaterial({ vertexColors: true, transparent: true, opacity: 0.42, emissive: 0x7f9cff, emissiveIntensity: 0.55, depthWrite: false, flatShading: true });
+const poolMatCache = new Map();
+const poolMat = col => { if (!poolMatCache.has(col)) poolMatCache.set(col, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.62, toneMapped: false, depthWrite: false })); return poolMatCache.get(col); };
+const wormMat = new THREE.PointsMaterial({ size: 0.07, color: new THREE.Color(0x8ffff0).multiplyScalar(3), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+function crystalCluster(down) {
+  const rng = mulberry32(down ? 91 : 77), parts = [];
+  for (let i = 0; i < 6; i++) {
+    const h = 0.45 + rng() * 0.7, g = new THREE.ConeGeometry(0.07 + rng() * 0.07, h, 5);
+    g.translate(0, h / 2, 0);
+    g.rotateZ((rng() - 0.5) * (i ? 1.2 : 0.3)); g.rotateY(rng() * 6.28);
+    g.translate((rng() - 0.5) * 0.25, 0, (rng() - 0.5) * 0.25);
+    parts.push(colGeo(g, 0xffffff, 0.45));
+  }
+  const g = mergeGeometries(parts);
+  if (down) g.rotateX(Math.PI);
+  return g;
+}
+const stalagGeo = (() => { const g = mergeGeometries([Co(0.42, 2.2, 7, 0, 1.1, 0, 0xffffff, 0.25), Co(0.2, 0.9, 6, 0.38, 0.45, 0.1, 0xffffff, 0.25)]); return g; })();
+const stalacGeo = (() => { const g = stalagGeo.clone(); g.rotateX(Math.PI); return g; })();
+const shroomStem = mergeGeometries([Cy(0.05, 0.07, 0.5, 6, 0, 0.25, 0, 0xe8e0cc), Cy(0.035, 0.05, 0.3, 6, 0.22, 0.15, 0.1, 0xe8e0cc)]);
+const shroomCap = (() => {
+  const cap = (r, x, y, z) => { const g = new THREE.SphereGeometry(r, 9, 4, 0, Math.PI * 2, 0, Math.PI / 2); g.scale(1, 0.6, 1); g.translate(x, y, z); return colGeo(g, 0xffffff, 0.12); };
+  return mergeGeometries([cap(0.2, 0, 0.48, 0), cap(0.11, 0.22, 0.29, 0.1)]);
+})();
+const hoardGeo = (() => {
+  const rng = mulberry32(5), p = [];
+  for (let i = 0; i < 9; i++) { const g = new THREE.IcosahedronGeometry(0.25 + rng() * 0.25, 0); g.scale(1, 0.45, 1); g.translate((rng() - 0.5) * 0.9, 0.05, (rng() - 0.5) * 0.9); p.push(colGeo(g, 0xffffff, 0.2)); }
+  for (let i = 0; i < 10; i++) { const g = new THREE.CylinderGeometry(0.07, 0.07, 0.015, 8); g.rotateX((rng() - 0.5) * 1.2); g.translate((rng() - 0.5) * 1.2, 0.2 + rng() * 0.12, (rng() - 0.5) * 1.2); p.push(colGeo(g, 0xffffff, 0.1)); }
+  p.push(B(0.18, 0.22, 0.18, 0.25, 0.25, -0.2, 0xd85a5a, 0.3, 0.5, 0), Ic(0.09, -0.3, 0.3, 0.25, 0x7ad8ff, 0));
+  return mergeGeometries(p);
+})();
+// a T-rex skeleton lying on its side
+function rexBones() {
+  const BONE = 0xe6dcc2, p = [];
+  const spine = x => 0.55 + Math.sin((x + 3.6) / 7.2 * Math.PI) * 0.35;
+  for (let x = -3.6; x <= 2.0; x += 0.26) p.push(Ic(0.13 * (1 - Math.max(0, -x - 1) / 3.5) + 0.05, x, spine(x), 0, BONE, 0.1));
+  for (let i = 0; i < 9; i++) {
+    const x = -0.6 + i * 0.26, l = 0.75 - Math.abs(i - 4) * 0.07;
+    for (const s of [-1, 1]) p.push(B(0.05, 0.05, l, x, spine(x) - 0.2, s * 0.22, BONE, s * 0.6, 0, 0));
+  }
+  p.push(B(0.75, 0.42, 0.34, 2.45, 0.62, 0, BONE), B(0.6, 0.12, 0.3, 2.42, 0.36, 0, BONE), Ic(0.08, 2.6, 0.72, 0.15, 0x3a3228, 0));
+  for (let i = 0; i < 6; i++) p.push(Co(0.025, 0.1, 4, 2.2 + i * 0.09, 0.43, 0.12, 0xfff8e6, 0));
+  for (const [x, a] of [[-0.9, 0.5], [-0.5, -0.4]]) p.push(B(0.12, 0.12, 1.1, x, 0.12, 0.55 * Math.sign(a), BONE, 0, a, 0), B(0.09, 0.09, 0.9, x + 0.5, 0.1, 1.1 * Math.sign(a), BONE, 0, -a, 0));
+  p.push(B(0.06, 0.06, 0.35, 1.0, 0.45, 0.35, BONE, 0, 0.4, 0));
+  return mergeGeometries(p);
+}
+const fossilGeo = rexBones();
+const CAVE_MODELS = {
+  boulder: { kind: 'rock', hp: 4, geos: [rockGeo], mats: caveRockMat, cm: 0, colors: ROCK_COLS },
+  stalag: { kind: 'rock', hp: 3, geos: [stalagGeo], mats: caveRockMat, cm: 0, colors: [0x7a756c, 0x8a7c6a, 0x6e6a62, 0x948a7a] },
+  stalac: { kind: 'rock', hp: 3, geos: [stalacGeo], mats: caveRockMat, cm: 0, colors: [0x7a756c, 0x8a7c6a, 0x6e6a62, 0x948a7a] },
+  crystal: { kind: 'crystal', hp: 4, geos: [crystalCluster(false)], mats: crystalMat, cm: 0 },
+  crystalDown: { kind: 'crystal', hp: 4, geos: [crystalCluster(true)], mats: crystalMat, cm: 0 },
+  shroom: { kind: 'shroom', hp: 1, geos: [shroomStem, shroomCap], mats: [matFlat, shroomGlowMat], cm: 1 },
+  hoard: { kind: 'hoard', hp: 2, geos: [hoardGeo], mats: goldMat, cm: 0 },
+  fossil: { kind: 'fossil', hp: 9, geos: [fossilGeo], mats: matFlat, cm: -1 },
+};
+const ENT_HINT = {
+  crystal: '💎 Glowing crystal · hold click to mine', fossil: '🦴 A fossil! · hold click to dig it out', hoard: '🪙 Dragon gold · hold click to take a little',
+};
+const ENT_DROP = {
+  crystal: () => ({ crystal: 1 + R(1) }), fossil: () => ({ fossil: 1 + R(1), stone: 1 }), hoard: () => ({ gold: 1 + R(1) }),
+};
+const ENT_FX = { crystal: e => e.col, fossil: () => 0xe6dcc2, hoard: () => 0xf2c84a, shroom: e => e.col };
+
+function buildCaveDeco(ch) {
+  const D = genDeco.get(ckey(ch.cx, ch.cz));
+  ch.genPieces = []; ch.genLights = []; ch.genAnimals = []; ch.genGeos = [];
+  if (!D) return;
+  const by = {};
+  for (const e of D.ents) if (!isHarvested(e.id)) (by[e.m] ||= []).push({ ...e });
+  for (const m in by) {
+    const M = CAVE_MODELS[m];
+    const ms = makeInstanced(M.geos, M.mats, by[m], M.cm, e => M.colors ? M.colors[(e.r * 10 | 0) % M.colors.length] : e.col, m !== 'crystal' && m !== 'crystalDown');
+    ms.forEach(x => { ch.group.add(x); ch.hitMeshes.push(x); ch.disposables.push(x); });
+  }
+  if (D.worms.length) {
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(D.worms, 3));
+    const pts = new THREE.Points(g, wormMat); pts.raycast = () => {};
+    ch.group.add(pts); ch.genGeos.push(g);
+  }
+  for (const [x, y, z, rad, col] of D.pools) {
+    const g = new THREE.CircleGeometry(rad, 22); g.rotateX(-Math.PI / 2); g.translate(x, y, z);
+    const m = new THREE.Mesh(g, poolMat(col)); m.raycast = () => {};
+    ch.group.add(m); ch.genGeos.push(g);
+  }
+  buildCracks(ch);
+  for (const [x, y, z, col] of D.lights) { const rec = { lightPos: new V3(x, y, z), kind: 'crystal', col }; glowPieces.push(rec); ch.genLights.push(rec); }
+  for (const p of D.pieces) {
+    if (looted.has(p.gid) && !p.loot) continue;
+    const rec = createPiece({ ...p, gen: true });
+    if (rec) ch.genPieces.push(rec);
+  }
+  for (const c of D.creatures) {
+    const a = spawnAnimal(c.type, c.x, c.z, c.v);
+    a.y = c.y; a.yaw = c.yaw; a.keep = true; a.name = c.name; a.home = { x: c.x, z: c.z };
+    if (c.sleeper) { a.sleeper = true; a.scale = 1.15; a.g.scale.setScalar(a.scale); }
+    ch.genAnimals.push(a);
+  }
+}
+// hairline cracks and moss on the wall hiding a secret room, until it's dug through
+function buildCracks(ch) {
+  if (ch.crackMesh) { ch.group.remove(ch.crackMesh); ch.crackMesh.geometry.dispose(); ch.crackMesh = null; }
+  const D = genDeco.get(ckey(ch.cx, ch.cz));
+  if (!D || !D.cracks.length) return;
+  const parts = [], m4 = new THREE.Matrix4(), t = new V3(), n = new V3();
+  for (const [x, y, z, nx, nz, bk] of D.cracks) {
+    if (dug.has(bk)) continue;
+    const rng = mulberry32(hash2(x * 10, z * 10, y * 10));
+    t.set(-nz, 0, nx); n.set(nx, 0, nz);
+    m4.makeBasis(t, UP, n).setPosition(x + nx * 0.02, y, z + nz * 0.02);
+    let u = (rng() - 0.5) * 0.6, v = 0.9;
+    for (let i = 0; i < 9; i++) {
+      const a = -Math.PI / 2 + (rng() - 0.5) * 1.4, l = 0.18 + rng() * 0.22, u2 = u + Math.cos(a) * l, v2 = v + Math.sin(a) * l;
+      parts.push(B(l + 0.03, 0.035, 0.02, (u + u2) / 2, (v + v2) / 2, 0, 0x1c1814, 0, 0, a).applyMatrix4(m4));
+      if (rng() < 0.4) { const b = a + (rng() < 0.5 ? 0.9 : -0.9), l2 = 0.12 + rng() * 0.15; parts.push(B(l2, 0.025, 0.02, u + Math.cos(b) * l2 / 2, v + Math.sin(b) * l2 / 2, 0, 0x1c1814, 0, 0, b).applyMatrix4(m4)); }
+      u = u2; v = v2;
+    }
+    for (let i = 0; i < 7; i++) { const g = new THREE.IcosahedronGeometry(0.08 + rng() * 0.12, 1); g.scale(1.5, 0.7, 0.1); g.translate((rng() - 0.5) * 1.7, -0.95 + rng() * 0.35, 0); parts.push(colGeo(g, rng() < 0.5 ? 0x6a8f45 : 0x58783a, 0.25).applyMatrix4(m4)); }
+  }
+  if (!parts.length) return;
+  const m = new THREE.Mesh(mergeGeometries(parts), matFlat);
+  m.raycast = () => {}; m.receiveShadow = true;
+  ch.group.add(m); ch.crackMesh = m;
+}
+function disposeCaveDeco(ch) {
+  if (ch.crackMesh) ch.crackMesh.geometry.dispose();
+  for (const rec of ch.genPieces || []) if (pieces.includes(rec)) removePiece(rec);
+  for (const rec of ch.genLights || []) { const i = glowPieces.indexOf(rec); if (i >= 0) glowPieces.splice(i, 1); }
+  for (const a of ch.genAnimals || []) removeAnimal(a);
+  for (const g of ch.genGeos || []) g.dispose();
+}
+const LOOT = {
+  chest: () => ({ gold: 1 + R(1), iron: R(2), copper: 1 + R(2), coal: 2 + R(3), crystal: R(1), glass: R(2) }),
+  secret: () => ({ gold: 4 + R(4), crystal: 2 + R(3), iron: 2 + R(2) }),
+};
+function openChest(rec) {
+  if (looted.has(rec.gid)) { toast('🧳 Empty. You already cleared this one out'); sfx('ui'); return; }
+  looted.add(rec.gid); dirty = true;
+  const g = Object.fromEntries(Object.entries(LOOT[rec.loot]()).filter(([, v]) => v > 0));
+  if (!rec.mimic) { sfx('pick'); burst(new V3(rec.x, rec.y + 0.8, rec.z), 0xf2c84a, 18); addInv(g); return; }
+  // surprise!
+  toast('😱 The chest has TEETH — it\'s a mimic!');
+  let t = 0, chomp = 0;
+  const yaw0 = rec.mesh.rotation.y;
+  anims.push(dt => {
+    t += dt; chomp -= dt;
+    const m = rec.mesh;
+    if (!m.parent) return true;
+    if (t < 2.2) {
+      m.position.y = rec.y + Math.abs(Math.sin(t * 9)) * 0.45;
+      m.rotation.y = yaw0 + Math.sin(t * 13) * 0.35;
+      m.rotation.z = Math.sin(t * 17) * 0.12;
+      if (chomp <= 0) { chomp = 0.22; sfx('chop'); }
+      return false;
+    }
+    m.position.y = rec.y; m.rotation.set(0, yaw0, 0);
+    const s = [];
+    for (const [k, v] of Object.entries(g)) { inv[k] += v * 2; s.push(`+${v * 2} ${ICON[k]}`); }
+    updateInv(); sfx('pick'); burst(new V3(rec.x, rec.y + 0.8, rec.z), 0xff8fb0, 20);
+    toast(`🥰 It only wanted a cuddle! The mimic coughs up ${s.join('  ')}`);
+    return true;
+  });
+}
+let areaT = 0;
+function updateUnderground(dt) {
+  areaT -= dt;
+  if (areaT > 0) return;
+  areaT = 0.4;
+  const p = P.pos;
+  for (const a of areas) {
+    if (found.has(a.id) || p.x < a.x0 || p.x > a.x1 || p.z < a.z0 || p.z > a.z1 || p.y < a.y0 || p.y > a.y1) continue;
+    found.add(a.id); dirty = true;
+    toast(a.msg); sfx('pick');
+    break;
+  }
+}
 
 // ---------------------------------------------------------------- water & clouds
 const water = new THREE.Mesh(new THREE.PlaneGeometry(1400, 1400).rotateX(-Math.PI / 2),
@@ -2458,6 +2996,17 @@ for (const id of ['ironfence', 'lamppost', 'anvil', 'brazier', 'beacon', 'weathe
 for (const d of DEF_LIST) if (d.kind === 'tool') d.surf = SURF.metal;
 addMats(WOOD, SURF.wood, ' wood'); addMats(STONE, SURF.stone, ' stone'); addMats(BRICK, SURF.brick, ' brick'); addMats(PLASTER, SURF.plaster, ' plaster'); addMats(ROOF, SURF.roof, ' tiles');
 addMats(METALS, SURF.metal); addMats(FABRIC, SURF.fabric, ' fabric'); addMats(TILE, SURF.tile, ' glaze'); addMats(HEDGE, SURF.leaf, ' leaves'); addMats(PAINT, SURF.paint, ' paint');
+DEF_LIST.push(
+  { id: 'crystallamp', name: 'Crystal Lamp', short: 'Crystal', icon: '💎', cat: 'Lighting', snap: 'free', pal: [['Amethyst', 0xb87cff], ['Aqua', 0x6ff0ff], ['Emerald', 0x6fff9a], ['Rose', 0xff7ab8], ['Amber', 0xffc04a]], cost: { crystal: 2, stone: 1 }, glow: 'stained', lightY: 0.7,
+    surf: SURF.stone, boxes: [[-0.32, 0, -0.32, 0.32, 1.2, 0.32]],
+    build: c => ({ parts: [Cy(0.3, 0.36, 0.22, 9, 0, 0.11, 0, 0x6e6a62), Ic(0.2, 0.18, 0.2, 0.1, 0x7a756c, 0.2)], glow: [colGeo(crystalCluster(false).scale(1.1, 1.1, 1.1).translate(0, 0.18, 0), c, 0.4)] }) },
+  { id: 'shroomlamp', name: 'Glowshroom Lamp', short: 'Glowshroom', icon: '🍄', cat: 'Lighting', snap: 'free', pal: [['Teal', 0x5ff2d8], ['Blue', 0x6fb8ff], ['Violet', 0xc48aff], ['Pink', 0xff8fd8]], cost: { shroom: 3 }, glow: 'stained', lightY: 0.8,
+    boxes: [[-0.4, 0, -0.4, 0.4, 1.0, 0.4]],
+    build: c => ({ parts: [shroomStem.clone().scale(1.9, 1.9, 1.9)], glow: [colGeo(shroomCap.clone().scale(1.9, 1.9, 1.9), c, 0.1)] }) },
+  { id: 'fossilrex', name: 'T-Rex Fossil', short: 'Fossil', icon: '🦴', cat: 'Decor', snap: 'free', pal: [['Bone', 0xe6dcc2]], cost: { fossil: 3, stone: 2 }, surf: SURF.stone,
+    boxes: [[-3.9, 0, -1.0, 3.3, 1.4, 1.0]],
+    build: c => ({ parts: [B(7.4, 0.25, 2.2, -0.3, 0.125, 0, 0x8a857c), fossilGeo.clone().translate(0, 0.25, 0)] }) },
+);
 // creatures you can release from the catalog (models and behaviour live in the animals section)
 const DRAGON_PAL = [['Emerald', 0x3a8a5a], ['Ruby', 0xb43a3a], ['Amethyst', 0x7a4aa8], ['Sapphire', 0x3a5aa8], ['Gold', 0xd8a83a], ['Shadow', 0x3a3a44]];
 const DINO_PAL = [['Forest', 0x5a8a4a], ['Sand', 0xc8a86a], ['Teal', 0x4a8a8a], ['Rust', 0xa8583a], ['Purple', 0x7a5a9a]];
@@ -2482,7 +3031,8 @@ for (const [cat, list] of [
     ['fairy', 'Fairy', '🧚', [['Rose', 0xf0a0c8], ['Bluebell', 0x8ab8f0], ['Leaf', 0x96d6b0], ['Sunny', 0xf2d26a]]],
     ['gnome', 'Gnome', '🧙', [['Red hat', 0xc8403a], ['Blue hat', 0x4a6aa8], ['Green hat', 0x4a8a4a], ['Purple hat', 0x7a4aa8]]],
     ['trex', 'T-Rex', '🦖', DINO_PAL], ['raptor', 'Raptor', '🦖', DINO_PAL], ['trike', 'Triceratops', '🦏', DINO_PAL],
-    ['stego', 'Stegosaurus', '🦎', DINO_PAL], ['bronto', 'Brontosaurus', '🦕', DINO_PAL]]],
+    ['stego', 'Stegosaurus', '🦎', DINO_PAL], ['bronto', 'Brontosaurus', '🦕', DINO_PAL],
+    ['ghost', 'Ghost', '👻', [['Pale', 0xdfe8ff], ['Misty', 0xc8dcc8], ['Rosy', 0xf0d0dc]]]]],
 ]) for (const [type, name, icon, pal] of list) DEF_LIST.push({ id: 'c_' + type, kind: 'creature', type, name, short: name.replace('Baby ', 'Baby '), icon, cat, pal });
 const DEFS = Object.fromEntries(DEF_LIST.map(d => [d.id, d]));
 for (const d of DEF_LIST) if (d.kind === 'blueprint') {
@@ -2598,7 +3148,7 @@ const plights = [];
 for (let i = 0; i < 6; i++) { const l = new THREE.PointLight(0xffb060, 0, 16, 2); scene.add(l); plights.push(l); }
 
 // ---------------------------------------------------------------- state
-const inv = Object.assign({ wood: 24, stone: 12, petals: 6, coal: 0, copperOre: 0, ironOre: 0, goldOre: 0, sand: 0, clay: 0, glass: 0, bricks: 0, copper: 0, iron: 0, gold: 0 }, save?.inv);
+const inv = Object.assign({ wood: 24, stone: 12, petals: 6, coal: 0, copperOre: 0, ironOre: 0, goldOre: 0, sand: 0, clay: 0, glass: 0, bricks: 0, copper: 0, iron: 0, gold: 0, crystal: 0, shroom: 0, fossil: 0 }, save?.inv);
 const DEFAULT_SLOTS = ['hand', 'floor', 'wall', 'door', 'window', 'roof', 'gable', 'stairs', 'lantern', 'fence'];
 const slots = (save?.slots?.length === 10 && save.slots.every(s => DEFS[s])) ? save.slots : DEFAULT_SLOTS.slice();
 const varSel = save?.varSel || {};
@@ -2691,7 +3241,9 @@ function updateAudio(dt, night) {
   if (ambT <= 0) {
     ambT = 0.5;
     const pan = (Math.random() - 0.5) * 1.6;
-    if (night < 0.4 && Math.random() < 0.18) {
+    if (caveF > 0.5) {
+      if (Math.random() < 0.3) { const f = 1500 + Math.random() * 1500; tone(f, t, 0.09, 0.05, 'sine', A.sfx, f * 1.9, pan); }
+    } else if (night < 0.4 && Math.random() < 0.18) {
       const n = 2 + ((Math.random() * 3) | 0), base = 2600 + Math.random() * 1200;
       for (let i = 0; i < n; i++) tone(base, t + i * 0.1, 0.07, 0.025, 'sine', A.sfx, base + 600 + Math.random() * 900, pan);
     } else if (night > 0.6 && Math.random() < 0.45) {
@@ -2713,6 +3265,7 @@ const RES = {
   wood: ['🌲', 'Wood'], stone: ['⛰️', 'Stone'], petals: ['🌸', 'Petals'], coal: ['⚫', 'Coal'], copperOre: ['🟠', 'Copper ore'], ironOre: ['🟤', 'Iron ore'],
   goldOre: ['🟡', 'Gold ore'], sand: ['🏖️', 'Sand'], clay: ['🏺', 'Clay'], glass: ['🔹', 'Glass'], bricks: ['🧱', 'Bricks'],
   copper: ['🥉', 'Copper ingot'], iron: ['🥈', 'Iron ingot'], gold: ['🥇', 'Gold ingot'],
+  crystal: ['💎', 'Crystal'], shroom: ['🍄', 'Glowshroom'], fossil: ['🦴', 'Fossil'],
 };
 const ICON = Object.fromEntries(Object.entries(RES).map(([k, v]) => [k, v[0]]));
 const costStr = cost => Object.entries(cost || {}).map(([k, v]) => `${v} ${ICON[k]}`).join('  ') || 'free';
@@ -2961,6 +3514,7 @@ const RES_HINT = {
   wood: 'Chop trees', stone: 'Mine rocks', petals: 'Pick flowers · cherry trees', coal: 'Coal seams · or charcoal from wood', copperOre: 'Hills · stone pickaxe',
   ironOre: 'High hills · copper pickaxe', goldOre: 'Mountains · iron pickaxe', sand: 'Dig on beaches', clay: 'Dig in fields', glass: 'Furnace: sand + coal',
   bricks: 'Furnace: clay + coal', copper: 'Furnace: copper ore + coal', iron: 'Furnace: iron ore + coal', gold: 'Furnace: gold ore + coal',
+  crystal: 'Deep crystal caverns · pickaxe', shroom: 'Glowing mushroom grottos', fossil: 'Buried in caverns · pickaxe',
 };
 let bagOpen = false;
 function renderBag() {
@@ -3319,7 +3873,7 @@ function blocksPlayer(def, x, y, z, rot) {
 
 function primary() {
   if (toolOf(curItem())) { harvestCD = 0; return; }
-  if (DEFS[curItem()].kind === 'empty') { if (target && target.type === 'flower') hitEnt(target.ent, target.hit.point); else interact(); return; }
+  if (DEFS[curItem()].kind === 'empty') { if (target && (target.type === 'flower' || target.type === 'shroom')) hitEnt(target.ent, target.hit.point); else interact(); return; }
   const def = DEFS[curItem()];
   if (def.kind === 'creature') { if (target && target.type !== 'animal') releaseCreature(def, target.hit.point); return; }
   if (!plan) return;
@@ -3351,9 +3905,10 @@ function secondary() {
   if (!target || target.type !== 'piece') return;
   const rec = target.piece, def = DEFS[rec.id];
   removePiece(rec);
-  if (!creative) for (const [k, v] of Object.entries(def.cost || {})) inv[k] += v;
+  if (rec.gen) looted.add(rec.gid);
+  else if (!creative) for (const [k, v] of Object.entries(def.cost || {})) inv[k] += v;
   updateInv();
-  toast(creative ? `${def.icon} ${def.name} removed` : `${def.icon} ${def.name} removed · +${costStr(def.cost)}`);
+  toast(creative || rec.gen ? `${def.icon} ${def.name} removed` : `${def.icon} ${def.name} removed · +${costStr(def.cost)}`);
   sfx('remove');
   burst(target.hit.point, def.pal[rec.v % def.pal.length][1], 8);
   target = null; dirty = true;
@@ -3370,6 +3925,7 @@ function interact() {
   if (target && target.type === 'animal') { interactAnimal(target.animal); return; }
   if (!target || target.type !== 'piece') return;
   const rec = target.piece;
+  if (rec.loot) { openChest(rec); return; }
   if (DEFS[rec.id].station) { openCraft(DEFS[rec.id].station); return; }
   if (rec.id === 'bed') {
     if (clockMode === 'real') toast('🛏️ Time follows your real clock — switch the menu clock to fast days to sleep through the night');
@@ -3398,10 +3954,10 @@ function sleep() {
 // harvesting
 const anims = [];
 function hitEnt(e, point) {
-  if (e.kind === 'flower') {
+  if (e.kind === 'flower' || e.kind === 'shroom') {
     e.gone = true; harvested[e.id] = Date.now();
     setEntMatrix(e, null, 0, 0);
-    burst(point, e.col, 7); sfx('pick'); addInv({ petals: 1 }); dirty = true;
+    burst(point, e.col, 7); sfx('pick'); addInv(e.kind === 'shroom' ? { shroom: e.s > 2 ? 3 : 1 } : { petals: 1 }); dirty = true;
     return;
   }
   const T = toolOf(curItem()) || DEFS.hand;
@@ -3409,7 +3965,7 @@ function hitEnt(e, point) {
   vmSwing = 1;
   e.hp = creative ? 0 : e.hp - (e.kind === 'tree' ? T.chop : T.mine);
   sfx(e.kind === 'tree' ? 'chop' : 'mine');
-  burst(point, e.kind === 'ore' ? ORES[e.ore].fleck : e.kind === 'rock' ? 0x9a958c : (Math.random() < 0.5 ? 0x8a6040 : TREE_TYPES[e.t].colors[0]), 6);
+  burst(point, ENT_FX[e.kind] ? ENT_FX[e.kind](e) : e.kind === 'ore' ? ORES[e.ore].fleck : e.kind === 'rock' ? 0x9a958c : (Math.random() < 0.5 ? 0x8a6040 : TREE_TYPES[e.t].colors[0]), 6);
   if (e.hp > 0) { anims.push(wobbleAnim(e)); return; }
   e.gone = true; harvested[e.id] = Date.now(); dirty = true;
   if (e.kind === 'tree') {
@@ -3424,7 +3980,8 @@ function hitEnt(e, point) {
       const O = ORES[e.ore], g = { [O.drop]: O.amt[0] + ((Math.random() * (O.amt[1] - O.amt[0] + 1)) | 0) };
       if (Math.random() < 0.5) g.stone = 1;
       addInv(g);
-    } else addInv({ stone: 2 + ((Math.random() * 2) | 0) + ((toolOf(curItem()) || DEFS.hand).tier >= 1 ? 1 : 0) });
+    } else if (ENT_DROP[e.kind]) { addInv(ENT_DROP[e.kind]()); if (e.kind === 'hoard') dragonStir(e); }
+    else addInv({ stone: 2 + ((Math.random() * 2) | 0) + ((toolOf(curItem()) || DEFS.hand).tier >= 1 ? 1 : 0) });
   }
 }
 function wobbleAnim(e) {
@@ -3653,8 +4210,10 @@ function updateEnv(dt) {
   for (const l of plights) {
     const r = l.userData.rec;
     if (!r) { l.intensity = 0; continue; }
-    if (r.kind === 'fire') { l.color.setHex(0xff9a40); l.intensity = (2 + night * 9) * flick; }
-    else { l.color.setHex(0xffc070); l.intensity = night * 7; }
+    const dark = Math.max(night, caveF);
+    if (r.kind === 'fire') { l.color.setHex(0xff9a40); l.intensity = (2 + dark * 9) * flick; }
+    else if (r.kind === 'crystal') { l.color.setHex(r.col); l.intensity = 5 + Math.sin(envT * 1.3 + r.lightPos.x) * 1.2; }
+    else { l.color.setHex(0xffc070); l.intensity = dark * 7; }
   }
 }
 
@@ -3906,6 +4465,7 @@ const ANIMALS = {
   trike: { name: 'Triceratops', walk: 0.9 },
   stego: { name: 'Stegosaurus', walk: 0.8 },
   bronto: { name: 'Brontosaurus', walk: 0.7 },
+  ghost: { name: 'Ghost', person: true, walk: 0.4, model: 'villager', ghost: true, stay: true },
 };
 for (const D of Object.values(ANIMALS)) { D.n ??= 0; D.run ??= D.walk * 3; D.flee ??= 0; D.size ??= 1; D.ok ??= LAND; }
 const NAMES = ['Rosie', 'Alfie', 'Mabel', 'Arthur', 'Ivy', 'Bertie', 'Poppy', 'Fred', 'Elsie', 'George', 'Hazel', 'Wilf', 'Daisy', 'Ted', 'Clem', 'Nell', 'Percy', 'Maud'];
@@ -3915,6 +4475,7 @@ const TALK = {
   baker: ['Fresh bread at dawn, every day!', 'Psst — the secret is extra butter.', "Cinnamon buns are cooling, don't tell anyone."],
   child: ['Race you to the big tree!', 'I found a frog! …it got away.', 'Can we build a treehouse?'],
   elder: ['When I was young, this valley was all meadows.', 'Slow down and listen to the birds.', 'Ah, a fine evening for a stroll.'],
+  ghost: ['Shhh… this is a library.', "I've been reading the same book for three hundred years. Cracking twist at the end.", 'Boo! …sorry, force of habit.', 'Mind the cobwebs, dear.', 'The treasure? Oh, someone bricked it up ages ago. Rude.'],
   gnome: ['Hmph. Mind my mushrooms.', 'Gnomes see everything. Everything.', 'I am NOT a garden ornament.'],
 };
 const PET_LINES = {
@@ -3964,6 +4525,7 @@ function spawnAnimal(type, x, z, v) {
   a.scale = D.size * (0.92 + Math.random() * 0.16);
   a.g.scale.setScalar(a.scale);
   a.g.traverse(o => { o.userData.animal = a; });
+  if (D.ghost) a.g.traverse(o => { if (o.isMesh) { o.material = spiritMat; o.castShadow = false; } });
   animalsGroup.add(a.g);
   animals.push(a);
   return a;
@@ -4007,6 +4569,7 @@ const VOICES = {
   woof: { type: 'square', f: [330, 170], dur: 0.13, lp: 1100, reps: 2, gap: 0.2 },
   cluck: { type: 'square', f: [900, 620], dur: 0.06, lp: 2500, reps: 3, gap: 0.12 },
   quack: { type: 'square', f: [470, 320], dur: 0.11, lp: 2500, reps: 2, gap: 0.16 },
+  snore: { type: 'sawtooth', f: [58, 86], dur: 1.9, lp: 240, vib: 6, rate: 19, noise: true, range: 45 },
   roar: { type: 'sawtooth', f: [120, 55], dur: 1.6, lp: 480, vib: 18, rate: 9, noise: true, range: 70 },
 };
 function animalSound(kind, a, loud = 1) {
@@ -4038,6 +4601,11 @@ function breathPuff(a) {
   burst(_mouth, Math.random() < 0.5 ? 0xff9a3a : 0x9a9a9a, 8);
 }
 function interactAnimal(a) {
+  if (a.sleeper) {
+    a.pets = (a.pets || 0) + 1; breathPuff(a); animalSound('snore', a, 0.8);
+    toast(a.pets % 3 === 0 ? `🐉 One huge golden eye opens… "Five more minutes," mumbles ${a.name}. The snoring resumes.` : `🐉 ${a.name} is fast asleep on the hoard. You pat its warm scales very, very gently.`);
+    return;
+  }
   a.calm = 8; a.state = 'idle'; a.timer = 3; a.grazing = false;
   if (a.D.person) {
     a.talkT = 2.5;
@@ -4075,7 +4643,7 @@ function updateAnimals(dt) {
     spawnT = 1.2;
     for (let i = animals.length - 1; i >= 0; i--) {
       const a = animals[i];
-      if (!a.tame && (a.x - P.pos.x) ** 2 + (a.z - P.pos.z) ** 2 > 120 * 120) removeAnimal(a);
+      if (!a.tame && !a.keep && (a.x - P.pos.x) ** 2 + (a.z - P.pos.z) ** 2 > 120 * 120) removeAnimal(a);
     }
     for (const type in ANIMALS) {
       const D = ANIMALS[type];
@@ -4088,8 +4656,9 @@ function updateAnimals(dt) {
   for (const a of animals) {
     const D = a.D, dx = a.x - P.pos.x, dz = a.z - P.pos.z, dp = Math.hypot(dx, dz);
     const far = dp > 90;
-    const sleepy = D.active === 'day' ? night > 0.75 : D.active === 'night' ? night < 0.25 : (D.person && night > 0.85);
+    const sleepy = D.active === 'day' ? night > 0.75 : D.active === 'night' ? night < 0.25 : (D.person && !D.ghost && night > 0.85);
     a.calm -= dt; a.timer -= dt; a.talkT -= dt;
+    if (a.sleeper) { sleepPose(a, dt, dp); continue; }
     if (!a.tame && D.flee && a.calm <= 0 && a.state !== 'flee' && dp < D.flee * (running ? 1 : 0.5) && Math.abs(P.pos.y - a.y) < 4) {
       const away = Math.atan2(dx, dz);
       for (let k = 0; k < 6; k++) {
@@ -4120,7 +4689,7 @@ function updateAnimals(dt) {
       a.speed = Math.max(0, a.speed - dt * 4);
       if (a.timer <= 0) {
         a.timer = 2;
-        if (!sleepy && !far) for (let k = 0; k < 5; k++) {
+        if (!sleepy && !far && !D.stay) for (let k = 0; k < 5; k++) {
           const ang = Math.random() * 6.28, r = 3 + Math.random() * 8 * Math.max(1, a.scale);
           const ox = a.tame ? a.home.x : a.x, oz = a.tame ? a.home.z : a.z;
           const tx = (a.tame ? ox : a.x) + Math.sin(ang) * r, tz = (a.tame ? oz : a.z) + Math.cos(ang) * r;
@@ -4143,7 +4712,7 @@ function updateAnimals(dt) {
     a.y = ground;
     a.phase += a.speed * dt * (D.hop ? 3.2 : 5.5) * (MODELS_STRIDE(a)) / a.scale;
     const lift = D.hop && a.speed > 0.2 ? Math.abs(Math.sin(a.phase)) * 0.18 * Math.min(1, a.speed / 2) : 0;
-    a.g.position.set(a.x, a.y + a.alt + lift - (sleepy && !D.water && !D.hover ? 0.06 * a.scale : 0), a.z);
+    a.g.position.set(a.x, a.y + a.alt + lift - (sleepy && !D.water && !D.hover ? 0.06 * a.scale : 0) + (D.ghost ? 0.25 + Math.sin(envT * 1.6 + a.seed) * 0.12 : 0), a.z);
     a.g.rotation.y = a.yaw;
     a.g.rotation.x = D.hop ? -Math.cos(a.phase) * lift * 1.2 : a.state === 'fly' ? -clamp(a.alt - (a.flyT > 0 ? D.flyer.alt : 0), -1, 1) * 0.15 : 0;
     const sw = Math.sin(a.phase) * Math.min(0.7, a.speed * 0.35 / Math.max(0.5, a.scale));
@@ -4170,6 +4739,24 @@ function updateAnimals(dt) {
     if (D.sparkle && Math.random() < dt * 1.5) burst(new V3(a.x + (Math.random() - 0.5) * 0.6, a.y + a.alt + (D.hover ? 0.1 : 1.2), a.z + (Math.random() - 0.5) * 0.6), 0xfff3a0, 1);
   }
   updateCritters(dt);
+}
+function sleepPose(a, dt, dp) {
+  a.y = groundAt(a.x, a.z, a.y + 0.5);
+  const s = a.scale, br = Math.sin(envT * 1.1 + a.seed);
+  // curled up: belly on the gold, legs tucked, chin down
+  a.g.position.set(a.x, a.y - 0.98 * s, a.z); a.g.rotation.set(0, a.yaw, 0);
+  a.g.scale.set(s, s * (1 + br * 0.035), s * (1 + br * 0.012));
+  for (const l of a.legs) l.rotation.x = l.position.z > 0 ? -1.45 : 1.45;
+  for (const w of a.wings) w.rotation.z = 1.18 * w.userData.side;
+  if (a.head) a.head.rotation.x = 0.95 + br * 0.03;
+  if (dp < 40 && Math.random() < dt * 0.6) { const M = animalModel(a.type, a.v); a.g.localToWorld(_mouth.set(...(M.mouth || [0, 1, 1]))); _mouth.y += 0.3; burst(_mouth, 0xe8eeff, 1); }
+  if (dp < 28 && Math.random() < dt * 0.1) animalSound('snore', a, 0.6);
+}
+function dragonStir(e) {
+  const a = animals.find(a => a.sleeper && (a.x - e.x) ** 2 + (a.z - e.z) ** 2 < 400);
+  if (!a || Math.random() < 0.4) return;
+  breathPuff(a); animalSound('snore', a, 1);
+  setTimeout(() => toast(`🐉 ${a.name} snorts in its sleep… and rolls over. Phew!`), 1100);
 }
 function MODELS_STRIDE(a) { return animalModel(a.type, a.v).stride || 1; }
 
@@ -4541,7 +5128,7 @@ const useVerb = d => d.station ? (d.station === 'furnace' ? 'smelt' : 'craft') :
 function animalHint(a) {
   const icon = DEFS['c_' + a.type]?.icon || a.D.icon || '🐾';
   const who = a.name ? `${a.name} the ${a.D.name.toLowerCase()}` : a.D.name;
-  return `${icon} ${who} · E to ${a.D.person ? 'chat' : 'pet'}${a.tame ? ' · right-click to send away' : ''}`;
+  return `${icon} ${who} · E to ${a.D.person ? 'chat' : a.sleeper ? 'gently pat' : 'pet'}${a.tame ? ' · right-click to send away' : ''}`;
 }
 function updateInteraction(dt) {
   target = findTarget();
@@ -4557,10 +5144,12 @@ function updateInteraction(dt) {
       setHint(can ? `${O.icon} ${O.name} · hold click to mine` : `${O.icon} ${O.name} · needs a ${TIER_NAMES[O.tier]} pickaxe or better`, !can);
     }
     else if (target.type === 'flower') setHint('🌼 Wildflower · click to pick');
+    else if (target.type === 'shroom') setHint('🍄 Glowshroom · click to pick');
+    else if (ENT_HINT[target.type]) setHint(ENT_HINT[target.type]);
     else if (target.type === 'animal') setHint(animalHint(target.animal));
     else if (target.type === 'piece') {
       const d = DEFS[target.piece.id];
-      setHint(`${d.icon} ${d.name}${d.id === 'bed' ? ' · E to sleep' : d.station ? ` · E to ${d.station === 'furnace' ? 'smelt' : 'craft'}` : ''} · right-click to remove`);
+      setHint(`${d.icon} ${d.name}${target.piece.loot ? ' · E to open' : d.id === 'bed' ? ' · E to sleep' : d.station ? ` · E to ${d.station === 'furnace' ? 'smelt' : 'craft'}` : ''} · right-click to remove`);
     } else if ((target.type === 'terrain' || target.type === 'cave') && (tool.dig || tool.family === 'pick')) {
       const p = target.hit.point, d = Math.max(0, Math.round(heightAt(p.x, p.z) - p.y));
       setHint(tool.dig ? `🥄 Dig soil${d ? ` · ${d} m down` : ''} · right-click to fill back in` : `⛏️ Dig into the ground${d ? ` · ${d} m down` : ''}`);
@@ -4575,10 +5164,11 @@ function updateInteraction(dt) {
     if (!target) setHint('');
     else if (target.type === 'animal') setHint(animalHint(target.animal));
     else if (target.type === 'flower') setHint('🌼 Wildflower · click to pick');
+    else if (target.type === 'shroom') setHint('🍄 Glowshroom · click to pick');
     else if (target.type === 'piece') {
-      const d = DEFS[target.piece.id], act = useVerb(d);
+      const d = DEFS[target.piece.id], act = target.piece.loot ? 'open' : useVerb(d);
       setHint(act ? `${d.icon} ${d.name} · click or E to ${act}` : `${d.icon} ${d.name}`);
-    } else if (target.type === 'tree' || target.type === 'rock' || target.type === 'ore') setHint('🤲 Hold a tool to gather this');
+    } else if (target.type === 'tree' || target.type === 'rock' || target.type === 'ore' || ENT_HINT[target.type]) setHint('🤲 Hold a tool to gather this');
     else setHint('');
   } else if (DEFS[item].kind === 'creature') {
     ghost.visible = false; plan = null;
@@ -4647,8 +5237,8 @@ function saveGame() {
   const data = {
     seed: SEED, inv, owned: [...owned], hours, dayNum, clockMode, slots, varSel, snapOn, creative, fly: P.fly, muted: A.muted, harvested,
     player: { x: P.pos.x, y: P.pos.y, z: P.pos.z, yaw: P.yaw, pitch: P.pitch },
-    pieces: pieces.map(p => [p.id, p.x, p.y, p.z, +p.rot.toFixed(4), p.v]),
-    dug: [...dug],
+    pieces: pieces.filter(p => !p.gen).map(p => [p.id, p.x, p.y, p.z, +p.rot.toFixed(4), p.v]),
+    dug: [...dug].filter(k => !natural.has(k)), filledNat: [...filledNat], looted: [...looted], found: [...found],
     creatures: animals.filter(a => a.tame).map(a => [a.type, +a.home.x.toFixed(2), +a.home.z.toFixed(2), a.v, a.name || '']),
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { console.warn('save failed', e); }
@@ -4677,6 +5267,7 @@ function frame(now) {
     updateViewModel(dt);
     for (let i = anims.length - 1; i >= 0; i--) if (anims[i](dt)) anims.splice(i, 1);
     updateAnimals(dt);
+    updateUnderground(dt);
     updateParticles(dt);
     updateAudio(dt, night);
   }
@@ -4724,7 +5315,7 @@ function boot() {
   renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { natural, ramps, genDeco, areas, found, openChest, cracks, dunBlocks, digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
