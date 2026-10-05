@@ -1543,20 +1543,26 @@ DEF_LIST.push(
 // A blueprint is a list of [part, dx, dy, dz, rotation, colour] relative to its origin cell. dy 'g' means "on the ground".
 const Q = Math.PI / 2;
 function houseBP(o) {
-  const { w, d, wall = 'wall', wallV = 0, win = 'window', winV = wallV, door = 'door', doorV = wallV, roof = 'roof', roofV = 0, gable = 'gable', gableV = wallV,
-    found = 'foundation', foundV = 0, floor = 'floor', floorV = 0, windows = true, chimney = null } = o;
-  const P = [], wy = 0.5 + (floor ? 0.2 : 0), top = wy + 2.4, half = d / 2, mid = Math.floor((w - 1) / 2);
+  const { w, d, levels = 1, wall = 'wall', wallV = 0, win = 'window', winV = wallV, door = 'door', doorV = wallV, roof = 'roof', roofV = 0, gable = 'gable', gableV = wallV,
+    found = 'foundation', foundV = 0, floor = 'floor', floorV = 0, windows = true, chimney = null, stairV = 1 } = o;
+  // each extra storey sits on a 0.2 floor on top of the walls below; stairs climb in the back-right cell
+  const P = [], wy = 0.5 + (floor ? 0.2 : 0), LH = 2.6, top = wy + LH * levels - 0.2, half = d / 2, mid = Math.floor((w - 1) / 2);
   for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) {
     P.push([found, i * 2, 0, j * 2, 0, foundV]);
     if (floor) P.push([floor, i * 2, 0.5, j * 2, 0, floorV]);
   }
   const W = useWin => useWin && windows ? [win, winV] : [wall, wallV];
-  for (let i = 0; i < w; i++) {
-    const [fid, fv] = i === mid ? [door, doorV] : W(true), [bid, bv] = W(i % 2 === 0);
-    P.push([fid, i * 2, wy, d * 2 - 1, 0, fv]);
-    P.push([bid, i * 2, wy, -1, 0, bv]);
+  for (let l = 0; l < levels; l++) {
+    const y = wy + LH * l;
+    if (l > 0) for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) if (!(i === w - 1 && j === 0)) P.push(['floor', i * 2, y - 0.2, j * 2, 0, floorV]);
+    for (let i = 0; i < w; i++) {
+      const [fid, fv] = i === mid && l === 0 ? [door, doorV] : W(true), [bid, bv] = W(i % 2 === 0 && !(levels > 1 && i === w - 1));
+      P.push([fid, i * 2, y, d * 2 - 1, 0, fv]);
+      P.push([bid, i * 2, y, -1, 0, bv]);
+    }
+    for (let j = 0; j < d; j++) for (const x of [-1, w * 2 - 1]) { const [id, v] = W(j === Math.floor(d / 2)); P.push([id, x, y, j * 2, Q, v]); }
   }
-  for (let j = 0; j < d; j++) for (const x of [-1, w * 2 - 1]) { const [id, v] = W(j === Math.floor(d / 2)); P.push([id, x, wy, j * 2, Q, v]); }
+  if (levels > 1) P.push(['stairs', (w - 1) * 2, wy, 0, 0, stairV]);
   for (let i = 0; i < w; i++) for (let k = 0; k < half; k++) {
     P.push([roof, i * 2, top + 2 * k, (d - 1 - k) * 2, 0, roofV]);
     P.push([roof, i * 2, top + 2 * k, k * 2, Math.PI, roofV]);
@@ -1566,7 +1572,7 @@ function houseBP(o) {
     for (let m = 0; m < k; m++) P.push([wall, x, top + 2 * m, j * 2, Q, wallV]);
     P.push([gable, x, top + 2 * k, j * 2, back ? 3 * Q : Q, gableV]);
   }
-  if (chimney) P.push(['chimney', ...chimney]);
+  if (chimney) P.push(['chimney', chimney[0], top, chimney[1], 0, chimney[2] || 0]);
   return P.concat(o.extras || []);
 }
 const BLUEPRINTS = [
@@ -1574,10 +1580,10 @@ const BLUEPRINTS = [
     pieces: houseBP({ w: 2, d: 2, wallV: 0, roofV: 0, extras: [['bed', 2.3, 0.7, 0.25, 0, 0], ['shelf', -0.25, 0.7, -0.72, 0, 1], ['table', 0.3, 0.7, 1.5, 0, 0], ['rug', 1.3, 0.7, 1.3, 0, 4],
       ['path', 0, 'g', 5, 0, 0], ['path', 0, 'g', 7, 0, 0], ['lantern', -1.6, 'g', 4.2, 0, 1], ['flowerbed', 2, 'g', 5, 0, 0]] }) },
   { id: 'bp_stone', name: 'Stone Cottage', icon: '🏰', desc: 'Stone walls, round windows, fireplace and chimney',
-    pieces: houseBP({ w: 2, d: 2, wall: 'stonewall', wallV: 0, win: 'roundwindow', winV: 0, door: 'archway', doorV: 0, roofV: 1, gable: 'gable', gableV: 1, chimney: [2.4, 3.1, -0.55, 0, 0],
+    pieces: houseBP({ w: 2, d: 2, wall: 'stonewall', wallV: 0, win: 'roundwindow', winV: 0, door: 'archway', doorV: 0, roofV: 1, gable: 'gable', gableV: 1, chimney: [2.4, -0.55, 0],
       extras: [['fireplace', 2.2, 0.7, -0.62, 0, 0], ['armchair', 1.4, 0.7, 0.9, Math.PI, 3], ['rug', 1.6, 0.7, 0.4, 0, 2], ['bed', -0.25, 0.7, 1.7, Q, 3], ['candles', 0.2, 0.7, -0.5, 0, 0]] }) },
   { id: 'bp_farmhouse', name: 'Farmhouse', icon: '🏘️', desc: '3×2 timber-frame house with thatch, kitchen and veg patch',
-    pieces: houseBP({ w: 3, d: 2, wall: 'tudorwall', wallV: 1, win: 'window', winV: 6, door: 'door', doorV: 1, roofV: 3, gableV: 6, chimney: [4.4, 3.1, -0.55, 0, 0],
+    pieces: houseBP({ w: 3, d: 2, wall: 'tudorwall', wallV: 1, win: 'window', winV: 6, door: 'door', doorV: 1, roofV: 3, gableV: 6, chimney: [4.4, -0.55, 0],
       extras: [['counter', 3.4, 0.7, -0.6, 0, 0], ['counter', 4.4, 0.7, -0.6, 0, 0], ['table', 2.6, 0.7, 1.6, 0, 1], ['bench', 2.6, 0.7, 2.4, Math.PI, 1], ['bed', -0.2, 0.7, 0.3, 0, 1], ['shelf', 1.2, 0.7, -0.72, 0, 1],
         ['vegpatch', 0, 'g', 6, 0, 1], ['vegpatch', 2, 'g', 6, 0, 0], ['vegpatch', 4, 'g', 6, 0, 2], ['haybale', 6.6, 'g', 1, Q, 0], ['barrel', 6.4, 'g', 3, 0, 1]] }) },
   { id: 'bp_barn', name: 'Big Barn', icon: '🛖', desc: '3×4 barn with a tall roof, hay and barrels',
@@ -1604,7 +1610,144 @@ const BLUEPRINTS = [
       ['vegpatch', 0, 'g', 0, 0, 0], ['vegpatch', 2, 'g', 0, 0, 1], ['vegpatch', 4, 'g', 0, 0, 2], ['flowerbed', 0, 'g', 2, 0, 0], ['flowerbed', 4, 'g', 2, 0, 4], ['path', 2, 'g', 2, 0, 1], ['path', 2, 'g', 4, 0, 1],
       ['vegpatch', 0, 'g', 4, 0, 1], ['vegpatch', 4, 'g', 4, 0, 0], ['haybale', 6.3, 'g', 0.5, Q, 0], ['birdhouse', 5.8, 'g', 4.6, 0, 2]] },
 ];
-for (const bp of BLUEPRINTS) DEF_LIST.push({ ...bp, kind: 'blueprint', short: bp.name.split(' ').pop(), cat: 'Buildings', pal: [['Preset', 0xffffff]] });
+// ---------------------------------------------------------------- castle & landmark parts
+DEF_LIST.push(
+  { id: 'battlement', name: 'Battlements', short: 'Battlement', icon: '🏯', cat: 'Walls', snap: 'edge', pal: STONE, cost: { stone: 2 },
+    boxes: [[-1, 0, -0.2, 1, 0.55, 0.2], [-1, 0, -0.2, -0.6, 1.05, 0.2], [-0.2, 0, -0.2, 0.2, 1.05, 0.2], [0.6, 0, -0.2, 1, 1.05, 0.2]],
+    build: c => {
+      const r = mulberry32(41);
+      return { parts: [B(2, 0.55, 0.4, 0, 0.275, 0, c), B(2.04, 0.08, 0.46, 0, 0.55, 0, dk(c, 0.85)), ...[-0.8, 0, 0.8].map(x => B(0.4, 0.5, 0.4, x, 0.84, 0, jit(c, r))),
+        ...[-0.8, 0, 0.8].map(x => B(0.44, 0.06, 0.44, x, 1.1, 0, dk(c, 0.85)))] };
+    } },
+  { id: 'arrowslit', name: 'Arrow-Slit Wall', short: 'Slit wall', icon: '🏹', cat: 'Walls', snap: 'edge', pal: STONE, cost: { stone: 4 }, glow: 'window', boxes: [[-1, 0, -0.15, 1, 2.4, 0.15]],
+    build: c => {
+      const r = mulberry32(43), p = [];
+      for (let row = 0; row < 6; row++) {
+        const y = row * 0.4 + 0.2;
+        for (const [x0, x1] of [[-1, -0.12], [0.12, 1]]) p.push(B(x1 - x0 - 0.04, 0.36, 0.28, (x0 + x1) / 2, y, 0, jit(c, r)));
+        if (row < 2 || row > 3) p.push(B(0.2, 0.36, 0.28, 0, y, 0, jit(c, r)));
+      }
+      return { parts: [B(1.96, 2.4, 0.2, 0, 1.2, 0, dk(c, 0.55)), ...p], glow: [B(0.2, 0.78, 0.04, 0, 1.2, 0, 0xffffff)] };
+    } },
+  { id: 'footing', name: 'Stone Footing', short: 'Footing', icon: '🧱', cat: 'Walls', snap: 'edge', pal: STONE, cost: { stone: 2 }, boxes: [[-1, -1.8, -0.3, 1, 0, 0.3]],
+    build: c => ({ parts: [colGeo(new THREE.BoxGeometry(2.08, 1.8, 0.6).translate(0, -0.9, 0), dk(c, 0.82), 0.12), B(2.14, 0.1, 0.66, 0, -0.05, 0, dk(c, 0.7))] }) },
+  { id: 'spire', name: 'Tower Spire', short: 'Spire', icon: '🗻', cat: 'Roofs', snap: 'cell', pal: ROOF, cost: { wood: 3 },
+    boxes: [[-0.9, 0, -0.9, 0.9, 1, 0.9], [-0.5, 1, -0.5, 0.5, 2, 0.5]],
+    build: c => {
+      const cone = new THREE.ConeGeometry(0.95, 3.2, 8); cone.translate(0, 1.6, 0);
+      return { parts: [colGeo(cone, c, 0.1), Cy(0.97, 0.97, 0.12, 8, 0, 0.06, 0, dk(c, 0.7)), Ic(0.08, 0, 3.25, 0, 0xc8a24a, 0), Cy(0.02, 0.02, 0.5, 5, 0, 3.5, 0, 0xc8a24a)] };
+    } },
+  { id: 'banner', name: 'Banner', short: 'Banner', icon: '🚩', cat: 'Garden', snap: 'free', pal: FABRIC, cost: { wood: 1, petals: 2 },
+    build: c => ({ parts: [Cy(0.04, 0.05, 3.2, 6, 0, 1.6, 0, 0x4a3628), Ic(0.08, 0, 3.26, 0, 0xc8a24a, 0), B(0.9, 0.04, 0.04, 0, 3.05, 0.38, 0x4a3628, 0, Math.PI / 2),
+      B(0.03, 1.2, 0.72, 0, 2.42, 0.4, c), B(0.035, 0.12, 0.72, 0, 1.86, 0.4, lt(c, 0.5)), Ic(0.13, 0.02, 2.5, 0.4, 0xe8c04a, 0), Co(0.18, 0.2, 3, 0, 1.72, 0.4, c, 0)] }) },
+  { id: 'brazier', name: 'Brazier', short: 'Brazier', icon: '🕯️', cat: 'Lighting', snap: 'free', pal: [['Iron', 0x4a4c50], ['Bronze', 0xa8783a]], cost: { iron: 1, wood: 1 }, glow: 'fire', lightY: 1.3,
+    build: c => ({ parts: [...[0, 2.09, 4.19].map(a => B(0.05, 1.05, 0.05, Math.cos(a) * 0.18, 0.5, Math.sin(a) * 0.18, c, Math.sin(a) * 0.18, 0, -Math.cos(a) * 0.18)), Cy(0.34, 0.18, 0.24, 10, 0, 1.06, 0, c), Cy(0.3, 0.3, 0.03, 10, 0, 1.17, 0, 0x2a2420)],
+      glow: [Co(0.2, 0.5, 6, 0, 1.42, 0, 0xffffff, 0), Co(0.11, 0.32, 5, 0.12, 1.34, 0.05, 0xffffff, 0), Co(0.1, 0.3, 5, -0.1, 1.32, -0.06, 0xffffff, 0)] }) },
+  { id: 'sails', name: 'Windmill Sails', short: 'Sails', icon: '🌬️', cat: 'Garden', snap: 'free', pal: WOOD, cost: { wood: 6, petals: 2 },
+    build: c => {
+      const blades = [];
+      for (let i = 0; i < 4; i++) {
+        const a = i * Math.PI / 2, g = mergeGeometries([B(0.12, 3.0, 0.06, 0, 1.75, 0, dk(c, 0.75)), B(0.7, 2.4, 0.03, 0.4, 2.0, 0.02, 0xf2ead8), ...[0, 1, 2, 3, 4].map(k => B(0.75, 0.04, 0.05, 0.38, 0.95 + k * 0.5, 0.04, dk(c, 0.75)))]);
+        g.rotateZ(a); blades.push(g);
+      }
+      return { parts: [B(0.22, 0.22, 0.7, 0, 0, -0.35, dk(c, 0.6))], spin: [Cy(0.18, 0.18, 0.2, 10, 0, 0, 0, dk(c, 0.6)).rotateX(Math.PI / 2), ...blades] };
+    } },
+  { id: 'beacon', name: 'Lighthouse Beacon', short: 'Beacon', icon: '🔆', cat: 'Lighting', snap: 'free', pal: [['Black', 0x2e3034], ['Red', 0xb4483e], ['White', 0xf4f2ec]], cost: { iron: 2, glass: 3 }, glow: 'lamp', lightY: 0.7,
+    build: c => {
+      const cap = new THREE.ConeGeometry(0.85, 0.6, 8); cap.translate(0, 1.55, 0);
+      return { parts: [Cy(0.75, 0.75, 0.12, 8, 0, 0.06, 0, c), ...Array.from({ length: 8 }, (_, i) => B(0.05, 1.1, 0.05, Math.cos(i * Math.PI / 4) * 0.62, 0.68, Math.sin(i * Math.PI / 4) * 0.62, c)),
+        Cy(0.72, 0.72, 0.1, 8, 0, 1.25, 0, c), colGeo(cap, c), Ic(0.08, 0, 1.92, 0, c, 0)],
+        glow: [Cy(0.58, 0.58, 1.05, 8, 0, 0.68, 0, 0xffffff)] };
+    } },
+);
+
+// ---------------------------------------------------------------- tower & castle generators
+const CH = 2.4;
+function towerParts(P, x, z, L, o = {}) {
+  const { wall = () => ['stonewall', 0], door = false, roof = 'spire', roofV = 1, battle = true, footing = true, slits = true } = o;
+  const edges = [[x, z + 1, 0], [x, z - 1, 0], [x - 1, z, Q], [x + 1, z, Q]];
+  for (const [ex, ez, r] of edges) {
+    if (footing) P.push(['footing', ex, 0, ez, r, 0]);
+    for (let l = 0; l < L; l++) {
+      const [id, v] = l === 0 && door && ez === z + 1 ? ['archway', wall(l)[1]] : slits && l % 2 === 1 && wall(l)[0] === 'stonewall' ? ['arrowslit', wall(l)[1]] : wall(l);
+      P.push([id, ex, CH * l, ez, r, v]);
+    }
+  }
+  const top = CH * L;
+  P.push(['floor', x, top, z, 0, 1]);
+  if (battle) for (const [ex, ez, r] of edges) P.push(['battlement', ex, top + 0.2, ez, r, wall(L - 1)[1]]);
+  if (roof) P.push([roof, x, top + 0.2, z, 0, roofV]);
+  return top + 0.2;
+}
+function castleBP({ n, levels, towerL, keepL, gateTowers = false, stoneV = 0, roofV = 1, flagV = 0 }) {
+  const P = [], N = n * 2 - 1, mid = Math.floor(n / 2);
+  const towers = [[0, 0], [n - 1, 0], [0, n - 1], [n - 1, n - 1]];
+  if (gateTowers) towers.push([mid - 1, n - 1], [mid + 1, n - 1]);
+  const isT = (i, j) => towers.some(([a, b]) => a === i && b === j);
+  // curtain walls with a gate in the middle of the front
+  for (let i = 0; i < n; i++) for (const [ex, ez, r, ci, cj] of [[i * 2, -1, 0, i, 0], [i * 2, N, 0, i, n - 1], [-1, i * 2, Q, 0, i], [N, i * 2, Q, n - 1, i]]) {
+    if (isT(ci, cj)) continue;
+    const gate = ez === N && i === mid;
+    P.push(['footing', ex, 0, ez, r, stoneV]);
+    for (let l = 0; l < levels; l++) P.push([gate && l === 0 ? 'archway' : l === levels - 1 && i % 2 ? 'arrowslit' : 'stonewall', ex, CH * l, ez, r, stoneV]);
+    P.push(['battlement', ex, CH * levels, ez, r, stoneV]);
+  }
+  for (const [i, j] of towers) towerParts(P, i * 2, j * 2, towerL, { wall: () => ['stonewall', stoneV], roof: 'spire', roofV });
+  // the keep: a 2x2 hall towards the back, door facing the gate
+  const kx = (mid - 1) * 2, kz = Math.max(1, mid - 2) * 2;
+  const kEdges = [[kx, kz + 3, 0], [kx + 2, kz + 3, 0], [kx, kz - 1, 0], [kx + 2, kz - 1, 0], [kx - 1, kz, Q], [kx - 1, kz + 2, Q], [kx + 3, kz, Q], [kx + 3, kz + 2, Q]];
+  for (const [ex, ez, r] of kEdges) {
+    P.push(['footing', ex, 0, ez, r, stoneV]);
+    for (let l = 0; l < keepL; l++) P.push([l === 0 && ex === kx + 2 && ez === kz + 3 ? 'archway' : l % 2 ? 'arrowslit' : 'stonewall', ex, CH * l, ez, r, stoneV]);
+    P.push(['battlement', ex, CH * keepL + 0.2, ez, r, stoneV]);
+  }
+  for (const [cx, cz, rr] of [[kx, kz, Math.PI], [kx + 2, kz, Q], [kx, kz + 2, 3 * Q], [kx + 2, kz + 2, 0]]) {
+    P.push(['floor', cx, 0, cz, 0, 1], ['floor', cx, CH * keepL, cz, 0, 1], ['roofcorner', cx, CH * keepL + 0.2, cz, rr, roofV]);
+  }
+  P.push(['fireplace', kx + 1, 0.2, kz - 0.62, 0, stoneV], ['table', kx + 1, 0.2, kz + 1.3, 0, 1], ['bench', kx + 1, 0.2, kz + 2.1, Math.PI, 1], ['banner', kx + 1, CH * keepL + 0.2, kz + 1, 0, flagV], ['rug', kx + 1, 0.2, kz + 0.6, 0, flagV]);
+  // courtyard
+  for (let j = kz / 2 + 2; j < n; j++) P.push(['path', mid * 2, 'g', j * 2, 0, stoneV]);
+  P.push(['well', 2.2, 'g', N - 2.6, 0, stoneV], ['brazier', mid * 2 - 1.4, 'g', N - 1.3, 0, 0], ['brazier', mid * 2 + 1.4, 'g', N - 1.3, 0, 0],
+    ['banner', mid * 2 - 1.5, 'g', N + 1.0, 0, flagV], ['banner', mid * 2 + 1.5, 'g', N + 1.0, 0, flagV],
+    ['barrel', N - 1.6, 'g', N - 3.4, 0, 1], ['barrel', N - 1.6, 'g', N - 2.6, 0, 0], ['crate', N - 2.6, 'g', N - 1.6, 0, 1], ['haybale', 2.2, 'g', 1.6, Q, 0]);
+  for (const [i, j] of towers.slice(0, 4)) P.push(['banner', i * 2, CH * towerL + 3.7, j * 2, 0, flagV]);
+  return P;
+}
+BLUEPRINTS.push(
+  { id: 'bp_townhouse', name: 'Townhouse', icon: '🏠', desc: 'Two-storey brick house with stairs and a bedroom upstairs',
+    pieces: houseBP({ w: 2, d: 2, levels: 2, wall: 'brickwall', wallV: 0, win: 'window', winV: 6, door: 'door', doorV: 1, roofV: 1, gableV: 1, chimney: [0.4, -0.55, 3],
+      extras: [['sofa', 0.3, 0.7, 2.1, Math.PI, 1], ['fireplace', 0.3, 0.7, -0.62, 0, 3], ['rug', 0.4, 0.7, 0.9, 0, 1], ['floorlamp', -0.6, 0.7, 2.4, 0, 2],
+        ['bed', 0.0, 3.3, 0.4, 0, 1], ['shelf', 2.2, 3.3, 2.65, Math.PI, 1], ['candles', 1.0, 3.3, -0.6, 0, 0], ['flowerbed', 2, 'g', 5, 0, 1], ['lantern', -1.6, 'g', 4.2, 0, 6]] }) },
+  { id: 'bp_inn', name: 'Village Inn', icon: '🍺', desc: 'Big two-storey timber inn: tavern below, guest rooms above',
+    pieces: houseBP({ w: 3, d: 2, levels: 2, wall: 'tudorwall', wallV: 0, win: 'window', winV: 6, door: 'door', doorV: 1, roofV: 6, gableV: 6, chimney: [2.4, -0.55, 0],
+      extras: [['table', 0.2, 0.7, 1.8, 0, 1], ['bench', 0.2, 0.7, 2.55, Math.PI, 1], ['bench', 0.2, 0.7, 1.05, 0, 1], ['table', 2.4, 0.7, 2.0, 0, 1], ['chair', 2.4, 0.7, 2.6, Math.PI, 1],
+        ['counter', 1.4, 0.7, -0.6, 0, 1], ['counter', 2.4, 0.7, -0.6, 0, 1], ['barrel', -0.5, 0.7, -0.5, 0, 1], ['barrel', -0.5, 0.7, 0.2, 0, 0], ['candles', 0.2, 1.5, 1.8, 0, 0],
+        ['bed', -0.1, 3.3, 0.4, 0, 1], ['bed', 2.0, 3.3, 0.4, 0, 3], ['rug', 1.0, 3.3, 1.9, 0, 2], ['floorlamp', 2.6, 3.3, 2.5, 0, 2],
+        ['banner', -1.6, 'g', 4.4, 0, 2], ['lantern', 5.6, 'g', 4.2, 0, 6], ['barrel', 6.0, 'g', 1.0, 0, 1]] }) },
+  { id: 'bp_chapel', name: 'Chapel', icon: '⛪', desc: 'Long stone chapel with glowing slit windows, pews and a spire',
+    pieces: houseBP({ w: 2, d: 4, wall: 'stonewall', wallV: 0, win: 'arrowslit', winV: 0, door: 'archway', doorV: 0, roofV: 1, gableV: 1,
+      extras: [...[1.6, 3.0, 4.4].flatMap(z => [['bench', 0.1, 0.7, z, Math.PI, 1], ['bench', 1.9, 0.7, z, Math.PI, 1]]), ['table', 1, 0.7, -0.3, 0, 1],
+        ['candles', 0.6, 1.5, -0.3, 0, 0], ['candles', 1.4, 1.5, -0.3, 0, 0], ['rug', 1, 0.7, 5.8, 0, 0], ['spire', 1, 6.9, 3, 0, 1],
+        ['path', 0, 'g', 9, 0, 0], ['path', 0, 'g', 11, 0, 0], ['lantern', -1.6, 'g', 8.4, 0, 1], ['lantern', 1.6, 'g', 8.4, 0, 1]] }) },
+  { id: 'bp_windmill', name: 'Windmill', icon: '🌬️', desc: 'Stone windmill with turning sails',
+    pieces: (() => {
+      const P = [];
+      towerParts(P, 0, 0, 3, { wall: () => ['stonewall', 1], door: true, roof: 'pyroof', roofV: 3, battle: false, slits: false });
+      P.push(['sails', 0, 5.6, 1.45, 0, 2], ['haybale', 2.4, 'g', 1.2, Q, 0], ['haybale', 2.4, 'g', 2.1, Q, 1], ['barrel', -2.0, 'g', 1.6, 0, 1], ['path', 0, 'g', 3, 0, 1], ['path', 0, 'g', 5, 0, 1]);
+      return P;
+    })() },
+  { id: 'bp_lighthouse', name: 'Lighthouse', icon: '🗼', desc: 'Striped lighthouse with a glowing beacon — lovely by the sea',
+    pieces: (() => {
+      const P = [];
+      const top = towerParts(P, 0, 0, 5, { wall: l => l % 2 ? ['brickwall', 0] : ['stonewall', 5], door: true, roof: null, battle: false, slits: false });
+      P.push(...[[0, 1, 0], [0, -1, 0], [-1, 0, Q], [1, 0, Q]].map(([x, z, r]) => ['railing', x, top, z, r, 7]), ['beacon', 0, top, 0, 0, 1]);
+      return P;
+    })() },
+  { id: 'bp_castle', name: 'Castle', icon: '🏰', desc: '6×6 walled castle with corner towers, a gate and a keep', pieces: castleBP({ n: 6, levels: 2, towerL: 3, keepL: 3, flagV: 1 }) },
+  { id: 'bp_grandcastle', name: 'Grand Castle', icon: '👑', desc: 'Huge 8×8 fortress: tall towers, gate towers and a great keep',
+    pieces: castleBP({ n: 8, levels: 3, towerL: 5, keepL: 4, gateTowers: true, stoneV: 0, roofV: 4, flagV: 4 }) },
+);
+for (const bp of BLUEPRINTS) DEF_LIST.push({ ...bp, kind: 'blueprint', short: bp.name.replace('Grand ', 'Grand ').split(' ').pop(), cat: 'Buildings', pal: [['Preset', 0xffffff]] });
 // creatures you can release from the catalog (models and behaviour live in the animals section)
 const DRAGON_PAL = [['Emerald', 0x3a8a5a], ['Ruby', 0xb43a3a], ['Amethyst', 0x7a4aa8], ['Sapphire', 0x3a5aa8], ['Gold', 0xd8a83a], ['Shadow', 0x3a3a44]];
 const DINO_PAL = [['Forest', 0x5a8a4a], ['Sand', 0xc8a86a], ['Teal', 0x4a8a8a], ['Rust', 0xa8583a], ['Purple', 0x7a5a9a]];
@@ -1651,7 +1794,7 @@ function pieceGeo(id, v) {
   if (!r) {
     const def = DEFS[id];
     const out = def.build(def.pal[v % def.pal.length][1]);
-    r = { g: mergeGeometries(out.parts), glow: out.glow ? mergeGeometries(out.glow) : null };
+    r = { g: mergeGeometries(out.parts), glow: out.glow ? mergeGeometries(out.glow) : null, spin: out.spin ? mergeGeometries(out.spin) : null };
     r.g.computeBoundingSphere();
     geoCache.set(k, r);
   }
@@ -1696,7 +1839,7 @@ const piecesGroup = new THREE.Group();
 scene.add(piecesGroup);
 const pieces = [];
 const glowPieces = [];
-const smokePieces = [];
+const smokePieces = [], spinners = [];
 function createPiece(rec) {
   const def = DEFS[rec.id];
   if (!def) return null;
@@ -1713,6 +1856,8 @@ function createPiece(rec) {
     if (def.lightY) { rec.lightPos = new V3(rec.x, rec.y + def.lightY, rec.z); rec.kind = def.glow; glowPieces.push(rec); }
   }
   if (def.smokeY) { rec.smokePos = new V3(rec.x, rec.y + def.smokeY, rec.z); smokePieces.push(rec); }
+  const { spin } = pieceGeo(rec.id, rec.v);
+  if (spin) { const sm = new THREE.Mesh(spin, matVC); sm.castShadow = true; sm.userData.piece = rec; mesh.add(sm); spinners.push(sm); rec.spinner = sm; }
   piecesGroup.add(mesh);
   rec.mesh = mesh;
   rec.boxes = worldBoxes(def, rec.x, rec.y, rec.z, rec.rot);
@@ -1731,6 +1876,7 @@ function removePiece(rec) {
   if (gi >= 0) glowPieces.splice(gi, 1);
   const si = smokePieces.indexOf(rec);
   if (si >= 0) smokePieces.splice(si, 1);
+  if (rec.spinner) spinners.splice(spinners.indexOf(rec.spinner), 1);
 }
 
 // point-light pool for lanterns and fires
@@ -1897,9 +2043,10 @@ function partThumb(id, v) {
   if (DEFS[id].kind === 'creature') grp = buildCreature(DEFS[id].type, v).g;
   else if (DEFS[id].kind === 'blueprint') grp = blueprintGroup(DEFS[id]);
   else {
-    const { g, glow } = pieceGeo(id, v);
+    const { g, glow, spin } = pieceGeo(id, v);
     grp = new THREE.Group();
     grp.add(new THREE.Mesh(g, matVC));
+    if (spin) grp.add(new THREE.Mesh(spin, matVC));
     if (glow) grp.add(new THREE.Mesh(glow, DEFS[id].glow === 'window' ? glowMats.window : thumbGlow));
   }
   thumbScene.add(grp);
@@ -2288,8 +2435,9 @@ let ghostKey = '';
 function blueprintGroup(def, mat) {
   const g = new THREE.Group();
   for (const [id, dx, dy, dz, r, v] of def.pieces) {
-    const { g: geo, glow } = pieceGeo(id, v || 0);
+    const { g: geo, glow, spin } = pieceGeo(id, v || 0);
     const m = new THREE.Mesh(geo, mat || matVC);
+    if (spin) m.add(new THREE.Mesh(spin, mat || matVC));
     m.position.set(dx, dy === 'g' ? 0 : dy, dz); m.rotation.y = r; m.renderOrder = 5;
     if (glow) { const gm = new THREE.Mesh(glow, mat || glowMats[DEFS[id].glow]); gm.renderOrder = 5; m.add(gm); }
     g.add(m);
@@ -3771,6 +3919,7 @@ function frame(now) {
   if (running) {
     if (clockMode === 'fast') hours += dt * 24 / DAY_SECONDS;
     wind.value += dt;
+    for (const sm of spinners) sm.rotation.z += dt * 0.7;
     grassPlayer.value.copy(P.pos);
     if (clockMode === 'fast' && hours >= 24) { hours -= 24; dayNum++; }
     edgeTurn(dt);
