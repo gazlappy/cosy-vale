@@ -725,6 +725,7 @@ function buildGrass(ch, dense) {
   const x0 = ch.cx * CHUNK, z0 = ch.cz * CHUNK;
   const blockers = pieces.filter(p => p.x > x0 - 3 && p.x < x0 + CHUNK + 3 && p.z > z0 - 3 && p.z < z0 + CHUNK + 3);
   const blocked = (x, z, h) => {
+    if (openCols.has(colKey(Math.floor(x / 2), Math.floor(z / 2)))) return true;
     for (const p of blockers) {
       if (Math.abs(p.y - h) > 1.2) continue;
       for (const bx of p.boxes) if (x > bx.minX - 0.15 && x < bx.maxX + 0.15 && z > bx.minZ - 0.15 && z < bx.maxZ + 0.15) return true;
@@ -841,20 +842,13 @@ function buildChunk(cx, cz) {
     terrainColor(c, x, z, h, slope);
     col[v] = c.r; col[v + 1] = c.g; col[v + 2] = c.b;
   }
-  const idx = new Uint32Array(SEG * SEG * 6);
-  let k = 0;
-  for (let j = 0; j < SEG; j++) for (let i = 0; i < SEG; i++) {
-    const a = j * N + i, b = a + 1, cc = a + N, d = a + N + 1;
-    idx[k++] = a; idx[k++] = cc; idx[k++] = b;
-    idx[k++] = b; idx[k++] = cc; idx[k++] = d;
-  }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.setIndex(terrainIndexFor(cx, cz));
   geo.computeVertexNormals(); geo.computeBoundingSphere(); geo.computeBoundingBox();
   const terrain = new THREE.Mesh(geo, terrainMat);
-  terrain.receiveShadow = true; terrain.userData.kind = 'terrain';
+  terrain.receiveShadow = terrain.castShadow = true; terrain.userData.kind = 'terrain';
 
   const hl = (x, z) => {
     const gx = (x - x0) / STEP, gz = (z - z0) / STEP;
@@ -870,7 +864,7 @@ function buildChunk(cx, cz) {
   ch.group.add(terrain);
   const rng = mulberry32(hash2(cx, cz, SEED));
   const builders = pieces.filter(p => p.x > x0 - 3 && p.x < x0 + CHUNK + 3 && p.z > z0 - 3 && p.z < z0 + CHUNK + 3);
-  const builtOn = (x, z) => builders.some(p => (p.x - x) ** 2 + (p.z - z) ** 2 < 2.6);
+  const builtOn = (x, z) => openCols.has(colKey(Math.floor(x / 2), Math.floor(z / 2))) || builders.some(p => (p.x - x) ** 2 + (p.z - z) ** 2 < 2.6);
 
   // trees
   const trees = TREE_TYPES.map(() => []);
@@ -949,11 +943,14 @@ function buildChunk(cx, cz) {
   ch.hl = hl;
   ch.sparse = buildGrass(ch, false);
 
+  if (chunkDug.has(ckey(cx, cz))) buildCave(ch);
   scene.add(ch.group);
   chunks.set(ckey(cx, cz), ch);
   return ch;
 }
 function disposeChunk(ch) {
+  if (ch.cave) ch.cave.geometry.dispose();
+  if (ch.dry) ch.dry.geometry.dispose();
   scene.remove(ch.group);
   ch.terrain.geometry.dispose();
   for (const m of ch.disposables) m.dispose();
@@ -976,6 +973,214 @@ function updateChunks() {
   }
   updateGrass(pcx, pcz);
 }
+
+
+// ---------------------------------------------------------------- digging: caves, pits & dungeons
+// Below the landscape is solid ground made of 2 m blocks lined up with the terrain grid. Digging removes
+// blocks; where a dug block reaches the surface the terrain gets a hole. Rock walls, floors and ceilings
+// are drawn only where dug space meets solid ground.
+const DIG_MIN_LAYER = -40;
+const dug = new Set(), colDug = new Map(), chunkDug = new Map(), openCols = new Set();
+const dKey = (ix, iy, iz) => ix + ',' + iy + ',' + iz;
+const colKey = (ix, iz) => ix + ',' + iz;
+const isDug = (ix, iy, iz) => dug.has(dKey(ix, iy, iz));
+const colHasDug = (ix, iz) => colDug.has(colKey(ix, iz));
+const chunkOfCol = (ix, iz) => ckey(Math.floor(ix * 2 / CHUNK), Math.floor(iz * 2 / CHUNK));
+function colRange(ix, iz) {
+  const a = heightRaw(ix * 2, iz * 2), b = heightRaw(ix * 2 + 2, iz * 2), c = heightRaw(ix * 2, iz * 2 + 2), d = heightRaw(ix * 2 + 2, iz * 2 + 2);
+  return [Math.min(a, b, c, d), Math.max(a, b, c, d)];
+}
+function surfLayers(ix, iz) { const [lo, hi] = colRange(ix, iz); return [Math.floor(lo / 2), Math.floor((hi - 0.001) / 2)]; }
+function refreshOpen(ix, iz) {
+  const [l0, l1] = surfLayers(ix, iz);
+  let open = true;
+  for (let L = l0; L <= l1; L++) if (!isDug(ix, L, iz)) { open = false; break; }
+  const k = colKey(ix, iz), was = openCols.has(k);
+  if (open) openCols.add(k); else openCols.delete(k);
+  return open !== was;
+}
+function addDug(ix, iy, iz) {
+  const k = dKey(ix, iy, iz);
+  if (dug.has(k)) return;
+  dug.add(k);
+  const ck = colKey(ix, iz); colDug.set(ck, (colDug.get(ck) || 0) + 1);
+  const hk = chunkOfCol(ix, iz); if (!chunkDug.has(hk)) chunkDug.set(hk, new Set()); chunkDug.get(hk).add(k);
+}
+function removeDug(ix, iy, iz) {
+  const k = dKey(ix, iy, iz);
+  if (!dug.delete(k)) return;
+  const ck = colKey(ix, iz), n = (colDug.get(ck) || 1) - 1; if (n) colDug.set(ck, n); else colDug.delete(ck);
+  chunkDug.get(chunkOfCol(ix, iz))?.delete(k);
+}
+// terrain triangles, leaving out columns that have been dug open
+function terrainIndexFor(cx, cz) {
+  const N = SEG + 1, out = [];
+  for (let j = 0; j < SEG; j++) for (let i = 0; i < SEG; i++) {
+    if (openCols.size && openCols.has(colKey(cx * SEG + i, cz * SEG + j))) continue;
+    const a = j * N + i, b = a + 1, cc = a + N, d = a + N + 1;
+    out.push(a, cc, b, b, cc, d);
+  }
+  return new THREE.BufferAttribute(new Uint32Array(out), 1);
+}
+const DIRT = new THREE.Color(0x6e5038), ROCK = new THREE.Color(0x77736c), ROCK2 = new THREE.Color(0x8a7c6a);
+// invisible lids at sea level over dug ground, so the lake surface doesn't show inside pits and caves
+const dryMat = new THREE.MeshBasicMaterial({ colorWrite: false });
+function buildCave(ch) {
+  if (ch.cave) { ch.group.remove(ch.cave); ch.cave.geometry.dispose(); ch.cave = null; }
+  if (ch.dry) { ch.group.remove(ch.dry); ch.dry.geometry.dispose(); ch.dry = null; }
+  const set = chunkDug.get(ckey(ch.cx, ch.cz));
+  if (!set || !set.size) return;
+  const hc = new Map(), H = (x, z) => { const k = x + ',' + z; let v = hc.get(k); if (v === undefined) hc.set(k, v = heightRaw(x, z)); return v; };
+  const pos = [], col = [], c = new THREE.Color(), e1 = new V3(), e2 = new V3(), nn = new V3();
+  const shade = (x, y, z, jit) => {
+    const depth = H(Math.round(x / 2) * 2, Math.round(z / 2) * 2) - y;
+    c.copy(DIRT).lerp(ROCK, smooth(1.0, 3.0, depth)).lerp(ROCK2, Math.max(0, Math.sin(y * 0.9)) * 0.35 * smooth(3, 6, depth));
+    c.multiplyScalar(clamp(1 - depth / 30, 0.38, 1) * jit);
+    return c;
+  };
+  const quad = (pts, n) => {
+    const r = mulberry32(hash2(Math.round(pts[0][0] * 7), Math.round(pts[0][1] * 7 + pts[0][2] * 3), 5))(), jit = 0.86 + r * 0.24;
+    for (const [a, b, d] of [[0, 1, 2], [0, 2, 3]]) {
+      let A = pts[a], Bp = pts[b], Cp = pts[d];
+      e1.set(Bp[0] - A[0], Bp[1] - A[1], Bp[2] - A[2]); e2.set(Cp[0] - A[0], Cp[1] - A[1], Cp[2] - A[2]); nn.crossVectors(e1, e2);
+      if (nn.x * n[0] + nn.y * n[1] + nn.z * n[2] < 0) [Bp, Cp] = [Cp, Bp];
+      for (const P3 of [A, Bp, Cp]) { pos.push(...P3); shade(P3[0], P3[1], P3[2], jit); col.push(c.r, c.g, c.b); }
+    }
+  };
+  const dry = [], dryCols = new Set();
+  for (const k of set) {
+    const [ix, iy, iz] = k.split(',').map(Number), x0 = ix * 2, y0 = iy * 2, z0 = iz * 2, y1 = y0 + 2;
+    if ((iy === -1 || iy === 0) && !dryCols.has(ix + ',' + iz)) { dryCols.add(ix + ',' + iz); dry.push(x0, 0.06, z0, x0, 0.06, z0 + 2, x0 + 2, 0.06, z0 + 2, x0, 0.06, z0, x0 + 2, 0.06, z0 + 2, x0 + 2, 0.06, z0); }
+    // side walls: the solid neighbour's face, cut off at the ground surface along the shared edge
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      if (isDug(ix + dx, iy, iz + dz)) continue;
+      let pA, pB;
+      if (dx) { const x = dx > 0 ? x0 + 2 : x0; pA = [x, z0]; pB = [x, z0 + 2]; }
+      else { const z = dz > 0 ? z0 + 2 : z0; pA = [x0, z]; pB = [x0 + 2, z]; }
+      const tA = Math.min(y1, H(pA[0], pA[1])), tB = Math.min(y1, H(pB[0], pB[1]));
+      if (tA <= y0 + 0.01 && tB <= y0 + 0.01) continue;
+      quad([[pA[0], y0, pA[1]], [pB[0], y0, pB[1]], [pB[0], Math.max(tB, y0), pB[1]], [pA[0], Math.max(tA, y0), pA[1]]], [-dx, 0, -dz]);
+    }
+    if (!isDug(ix, iy - 1, iz)) quad([[x0, y0, z0], [x0 + 2, y0, z0], [x0 + 2, y0, z0 + 2], [x0, y0, z0 + 2]], [0, 1, 0]);
+    const [lo] = colRange(ix, iz);
+    if (!isDug(ix, iy + 1, iz) && y1 < lo - 0.05) quad([[x0, y1, z0], [x0 + 2, y1, z0], [x0 + 2, y1, z0 + 2], [x0, y1, z0 + 2]], [0, -1, 0]);
+  }
+  if (!pos.length) return;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('surf', new THREE.BufferAttribute(new Float32Array(pos.length / 3).fill(SURF.stone), 1));
+  g.computeVertexNormals(); g.computeBoundingSphere();
+  const m = new THREE.Mesh(g, matVC);
+  m.castShadow = m.receiveShadow = true; m.userData.kind = 'cave';
+  ch.group.add(m); ch.cave = m;
+  if (dry.length) {
+    const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.Float32BufferAttribute(dry, 3)); dg.computeBoundingSphere();
+    const dm = new THREE.Mesh(dg, dryMat); dm.renderOrder = 999; dm.raycast = () => {};
+    ch.group.add(dm); ch.dry = dm;
+  }
+}
+function refreshDigArea(ix, iz, openChanged) {
+  const cx = Math.floor(ix * 2 / CHUNK), cz = Math.floor(iz * 2 / CHUNK), li = ix - cx * SEG, lj = iz - cz * SEG;
+  const ch = chunks.get(ckey(cx, cz));
+  if (ch) { buildCave(ch); if (openChanged) { ch.terrain.geometry.setIndex(terrainIndexFor(cx, cz)); ch.grassDirty = true; } }
+  // a block on a chunk edge also changes the walls drawn by the neighbouring chunk
+  for (const [dx, dz, on] of [[-1, 0, li === 0], [1, 0, li === SEG - 1], [0, -1, lj === 0], [0, 1, lj === SEG - 1]]) if (on) { const n = chunks.get(ckey(cx + dx, cz + dz)); if (n) buildCave(n); }
+  if (openChanged) {
+    // trees, rocks and flowers standing in a fresh hole fall in
+    for (const c of chunks.values()) for (const m of c.hitMeshes) for (const e of m.userData.list)
+      if (!e.gone && Math.floor(e.x / 2) === ix && Math.floor(e.z / 2) === iz) { e.gone = true; setEntMatrix(e, null, 0, 0); }
+  }
+}
+// dig the block at (ix, iy, iz); if it touches the surface, the column is opened right up to the sky
+function digBlock(ix, iy, iz) {
+  const [lo, hi] = colRange(ix, iz);
+  if (iy * 2 >= hi || iy < DIG_MIN_LAYER || isDug(ix, iy, iz)) return false;
+  const [, l1] = surfLayers(ix, iz);
+  if (iy * 2 + 2 > lo) for (let L = iy; L <= l1; L++) addDug(ix, L, iz);
+  else addDug(ix, iy, iz);
+  refreshDigArea(ix, iz, refreshOpen(ix, iz));
+  dirty = true;
+  return true;
+}
+function fillBlock(ix, iy, iz) {
+  if (!isDug(ix, iy, iz)) return false;
+  const px = Math.floor(P.pos.x / 2), pz = Math.floor(P.pos.z / 2);
+  if (px === ix && pz === iz && P.pos.y < iy * 2 + 2 && P.pos.y + HGT > iy * 2) return false;
+  removeDug(ix, iy, iz);
+  refreshDigArea(ix, iz, refreshOpen(ix, iz));
+  dirty = true;
+  return true;
+}
+const blockAt = (x, y, z) => [Math.floor(x / 2), Math.floor(y / 2), Math.floor(z / 2)];
+function blockDepth(ix, iy, iz) { return heightRaw(ix * 2 + 1, iz * 2 + 1) - (iy * 2 + 1); }
+function digAt(hit, tool) {
+  const n = _n.copy(hit.face ? hit.face.normal : UP).transformDirection(hit.object.matrixWorld), p = hit.point;
+  // the solid block just behind the surface you hit (nudged off block edges if the first guess is already empty)
+  let ix, iy, iz;
+  for (const [ox, oy, oz] of [[0, 0, 0], [0.1, 0, 0], [-0.1, 0, 0], [0, 0, 0.1], [0, 0, -0.1], [0, -0.1, 0], [0.1, 0, 0.1], [-0.1, 0, -0.1], [0.1, 0, -0.1], [-0.1, 0, 0.1]]) {
+    [ix, iy, iz] = blockAt(p.x - n.x * 0.3 + ox, p.y - n.y * 0.3 + oy, p.z - n.z * 0.3 + oz);
+    if (!isDug(ix, iy, iz) && iy * 2 < colRange(ix, iz)[1]) break;
+  }
+  const [lo] = colRange(ix, iz);
+  if (lo < 0.3) { sfx('deny'); toast('🌊 Too wet to dig here'); return; }
+  if (iy < DIG_MIN_LAYER) { sfx('deny'); toast('🪨 Bedrock — you can\'t dig any deeper'); return; }
+  const depth = blockDepth(ix, iy, iz), soft = depth < 4;
+  if (tool.dig && !soft && !creative) { sfx('deny'); toast('⛰️ Too hard for a shovel — use a pickaxe'); return; }
+  if (!digBlock(ix, iy, iz)) return;
+  vmSwing = 1; sfx('mine');
+  burst(p, soft ? 0x7a5a3a : 0x8a867e, 12);
+  // what comes out of the hole
+  const T = tool, g = {};
+  if (tool.dig) g[lo < 1.6 ? 'sand' : 'clay'] = 1 + ((Math.random() * 2) | 0);
+  else {
+    g.stone = 1 + ((Math.random() * 2) | 0);
+    const r = Math.random();
+    if (depth > 20 && T.tier >= 3 && r < 0.06) g.goldOre = 1;
+    else if (depth > 12 && T.tier >= 2 && r < 0.14) g.ironOre = 1;
+    else if (depth > 5 && r < 0.24) g[r < 0.12 ? 'coal' : 'copperOre'] = 1 + ((Math.random() * 2) | 0);
+  }
+  addInv(g);
+}
+function fillAt(hit) {
+  const n = _n.copy(hit.face ? hit.face.normal : UP).transformDirection(hit.object.matrixWorld), p = hit.point;
+  const [ix, iy, iz] = blockAt(p.x + n.x * 0.3, p.y + n.y * 0.3, p.z + n.z * 0.3);
+  if (fillBlock(ix, iy, iz)) { sfx('place'); burst(p, 0x7a5a3a, 8); }
+  else { sfx('deny'); toast('🕳️ Nothing to fill there'); }
+}
+// ground and walls for the player (and animals) once there are holes about
+function caveGround(x, z, yRef) {
+  const h = heightAt(x, z), ix = Math.floor(x / 2), iz = Math.floor(z / 2);
+  if (!colHasDug(ix, iz)) return h;
+  const top = yRef + STEP_H, hL = Math.floor(h / 2);
+  let L = Math.min(Math.floor(top / 2), hL);
+  if (Math.floor(top / 2) > hL && !isDug(ix, hL, iz)) return h;
+  for (; L >= DIG_MIN_LAYER - 1; L--) if (!isDug(ix, L, iz)) return Math.min(L * 2 + 2, h);
+  return -1e9;
+}
+function addVoxelBoxes(x, z, y, out) {
+  const ix0 = Math.floor(x / 2), iz0 = Math.floor(z / 2);
+  let any = false;
+  for (let dx = -1; dx <= 1 && !any; dx++) for (let dz = -1; dz <= 1; dz++) if (colHasDug(ix0 + dx, iz0 + dz)) { any = true; break; }
+  if (!any) return;
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const ix = ix0 + dx, iz = iz0 + dz, [lo, hi] = colRange(ix, iz);
+    for (let L = Math.floor((y - 0.5) / 2); L <= Math.floor((y + HGT + 0.5) / 2); L++) {
+      if (isDug(ix, L, iz) || L * 2 >= hi) continue;
+      // blocks reaching the surface only stand as high as the ground next to you, so slopes stay walkable
+      const top = L * 2 + 2 > lo ? Math.min(L * 2 + 2, heightAt(clamp(x, ix * 2, ix * 2 + 2), clamp(z, iz * 2, iz * 2 + 2))) : L * 2 + 2;
+      out.push({ minX: ix * 2, maxX: ix * 2 + 2, minZ: iz * 2, maxZ: iz * 2 + 2, minY: L * 2, maxY: top, stamp: 0 });
+    }
+  }
+}
+function undergroundDepth(pos) {
+  const ix = Math.floor(pos.x / 2), iz = Math.floor(pos.z / 2);
+  if (!colHasDug(ix, iz)) return 0;
+  return Math.max(0, heightAt(pos.x, pos.z) - pos.y);
+}
+const caveLight = new THREE.PointLight(0xffc88a, 0, 14, 1.6);
+scene.add(caveLight);
+let caveF = 0;
 
 // ---------------------------------------------------------------- water & clouds
 const water = new THREE.Mesh(new THREE.PlaneGeometry(1400, 1400).rotateX(-Math.PI / 2),
@@ -2612,7 +2817,8 @@ function updateClock() {
   $('clockIcon').textContent = sunDir.y > 0.2 ? '☀️' : sunDir.y > -0.08 ? (hours < 12 ? '🌅' : '🌇') : MOON_NAME.slice(0, 2);
   const S = SEASONS[SEASON];
   const date = clockMode === 'real' ? new Date().toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) : `Day ${dayNum}`;
-  $('dayText').textContent = `${date} · ${S.icon} ${S.name}`;
+  const deep = Math.round(undergroundDepth(camPos));
+  $('dayText').textContent = deep > 1 ? `⬇️ ${deep} m underground` : `${date} · ${S.icon} ${S.name}`;
   $('clockText').title = MOON_NAME;
 }
 function renderClockBtn() { $('clockBtn').textContent = clockMode === 'real' ? '🕰️ Clock: real time' : '⏩ Clock: fast days'; }
@@ -2792,12 +2998,6 @@ function openBag() {
   if (document.pointerLockElement) document.exitPointerLock();
 }
 function closeBag(relock) { bagOpen = false; $('bag').classList.add('hidden'); if (relock) lock(); }
-function dig(p) {
-  const h = heightAt(p.x, p.z), res = h < 1.5 ? 'sand' : h < 22 ? 'clay' : null;
-  if (!res) { sfx('deny'); toast('⛰️ Too rocky to dig here'); return; }
-  burst(p, res === 'sand' ? 0xe8d5a6 : 0xb07a5a, 8); sfx('mine'); vmSwing = 1;
-  addInv({ [res]: 1 }); dirty = true;
-}
 
 // the tool in your hand, bottom-right of the view; it swings when you use it
 const vm = new THREE.Group();
@@ -2971,6 +3171,7 @@ function nearObjects(withEnts) {
     const ch = chunks.get(ckey(pcx + dx, pcz + dz));
     if (!ch) continue;
     out.push(ch.terrain);
+    if (ch.cave) out.push(ch.cave);
     if (withEnts) out.push(...ch.hitMeshes);
   }
   out.push(piecesGroup);
@@ -2990,6 +3191,7 @@ function findTarget() {
     if (ud.animal) return { type: 'animal', animal: ud.animal, hit: h };
     if (ud.piece) return { type: 'piece', piece: ud.piece, hit: h };
     if (ud.kind === 'terrain') return { type: 'terrain', hit: h };
+    if (ud.kind === 'cave') return { type: 'cave', hit: h };
     if (ud.kind === 'ent') {
       const e = ud.list[h.instanceId];
       if (!e || e.gone) continue;
@@ -3008,7 +3210,7 @@ function computePlan(def) {
   _b.copy(p).addScaledVector(_n, 0.05);
   const hp = target.type === 'piece' ? target.piece : null;
   const onTop = _n.y > 0.6;
-  let baseY = hp ? (onTop ? p.y : hp.y) : null;
+  let baseY = hp ? (onTop ? p.y : hp.y) : target.type === 'cave' ? Math.round(p.y * 100) / 100 : null;
   const yawSnap = Math.round(viewYaw() / (Math.PI / 2)) * (Math.PI / 2);
   if (def.kind === 'blueprint') {
     const x = Math.round(_b.x / 2) * 2, z = Math.round(_b.z / 2) * 2;
@@ -3144,6 +3346,7 @@ function placeBlueprint(def, plan) {
   dirty = true;
 }
 function secondary() {
+  if (target && (target.type === 'terrain' || target.type === 'cave') && toolOf(curItem())?.dig) { fillAt(target.hit); return; }
   if (target && target.type === 'animal') { if (target.animal.tame) sendAway(target.animal); return; }
   if (!target || target.type !== 'piece') return;
   const rec = target.piece, def = DEFS[rec.id];
@@ -3268,13 +3471,14 @@ function overlapsXZ(x, z, r, b) {
   return (x - cx) ** 2 + (z - cz) ** 2 < r * r;
 }
 function groundAt(x, z, yRef) {
-  let g = heightAt(x, z);
+  let g = caveGround(x, z, yRef);
   queryBoxes(x, z, 1, nearBoxes);
   for (const b of nearBoxes) if (b.maxY <= yRef + STEP_H && b.maxY > g && overlapsXZ(x, z, RAD * 0.75, b)) g = b.maxY;
   return g;
 }
 function collideXZ() {
   queryBoxes(P.pos.x, P.pos.z, 2, nearBoxes);
+  addVoxelBoxes(P.pos.x, P.pos.z, P.pos.y, nearBoxes);
   for (let it = 0; it < 2; it++) for (const b of nearBoxes) {
     if (b.maxY <= P.pos.y + STEP_H || b.minY >= P.pos.y + HGT) continue;
     const cx = clamp(P.pos.x, b.minX, b.maxX), cz = clamp(P.pos.z, b.minZ, b.maxZ);
@@ -3298,7 +3502,7 @@ function updatePlayer(dt) {
   if (wl > 1) { wx /= wl; wz /= wl; }
   const shift = keys.ShiftLeft || keys.ShiftRight;
   const wasInWater = P.inWater;
-  P.inWater = !P.fly && P.pos.y < WATER - 0.9;
+  P.inWater = !P.fly && P.pos.y < WATER - 0.9 && undergroundDepth(P.pos) < 0.5;
   if (P.inWater && !wasInWater && P.vel.y < -3) sfx('splash');
   let speed = P.fly ? 16 : shift ? 7.2 : 4.4;
   if (P.inWater) speed *= 0.6;
@@ -3321,11 +3525,12 @@ function updatePlayer(dt) {
   P.pos.y += P.vel.y * dt;
   if (!P.fly && P.vel.y > 0) {
     queryBoxes(P.pos.x, P.pos.z, 1, nearBoxes);
+    addVoxelBoxes(P.pos.x, P.pos.z, P.pos.y, nearBoxes);
     for (const b of nearBoxes) {
       if (b.minY > prevY + STEP_H && b.minY < P.pos.y + HGT && overlapsXZ(P.pos.x, P.pos.z, RAD * 0.75, b)) { P.pos.y = b.minY - HGT; P.vel.y = 0; }
     }
   }
-  const g = P.fly ? heightAt(P.pos.x, P.pos.z) : groundAt(P.pos.x, P.pos.z, Math.max(prevY, P.pos.y));
+  const g = P.fly ? caveGround(P.pos.x, P.pos.z, P.pos.y) : groundAt(P.pos.x, P.pos.z, Math.max(prevY, P.pos.y));
   if (P.pos.y <= g) {
     if (!P.onGround && P.vel.y < -9) sfx('step');
     P.pos.y = g; if (P.vel.y < 0) P.vel.y = 0; P.onGround = true;
@@ -3375,10 +3580,16 @@ function updateEnv(dt) {
   stars.material.opacity = smooth(0.35, 0.9, night) * 0.9;
 
   camera.getWorldPosition(camPos);
-  const under = camPos.y < WATER - 0.05;
+  caveF += (smooth(1.0, 5.0, undergroundDepth(camPos)) - caveF) * Math.min(1, dt * 2 + (dt ? 0 : 1));
+  const under = camPos.y < WATER - 0.05 && caveF < 0.1;
   $('underwater').classList.toggle('hidden', !under);
   if (under) { scene.fog.color.set(0x2d6f8f); scene.fog.near = 1; scene.fog.far = 28; }
-  else { scene.fog.color.copy(_hor); scene.fog.near = fogNear; scene.fog.far = fogFar; }
+  else {
+    scene.fog.color.copy(_hor).lerp(_c.setHex(0x120e0a), caveF);
+    scene.fog.near = fogNear + (3 - fogNear) * caveF; scene.fog.far = fogFar + (34 - fogFar) * caveF;
+  }
+  water.visible = caveF < 0.5;
+  caveLight.position.copy(camPos); caveLight.intensity = caveF * 5;
 
   const sunUp = sunDir.y > -0.02;
   const ldir = sunUp ? sunDir : moonDir.y > 0 ? moonDir : _b.set(0.3, 1, 0.2).normalize();
@@ -3389,8 +3600,9 @@ function updateEnv(dt) {
   sun.position.set(px + ldir.x * 100, P.pos.y + ldir.y * 100, pz + ldir.z * 100);
   hemi.color.copy(SKY.hemiNight).lerp(SKY.hemiDay, day);
   hemi.groundColor.copy(SKY.groundNight).lerp(SKY.groundDay, day);
-  hemi.intensity = 0.42 + day * 0.33;
-  scene.environmentIntensity = 0.06 + day * 0.3;
+  hemi.intensity = (0.42 + day * 0.33) * (1 - 0.8 * caveF);
+  scene.environmentIntensity = (0.06 + day * 0.3) * (1 - 0.85 * caveF);
+  sun.intensity *= 1 - 0.85 * caveF;
 
   sky.position.copy(camPos);
   stars.position.copy(camPos);
@@ -4349,14 +4561,14 @@ function updateInteraction(dt) {
     else if (target.type === 'piece') {
       const d = DEFS[target.piece.id];
       setHint(`${d.icon} ${d.name}${d.id === 'bed' ? ' · E to sleep' : d.station ? ` · E to ${d.station === 'furnace' ? 'smelt' : 'craft'}` : ''} · right-click to remove`);
-    } else if (target.type === 'terrain' && tool.dig) {
-      const h = heightAt(target.hit.point.x, target.hit.point.z);
-      setHint(h < 1.5 ? '🏖️ Sand · click to dig' : h < 22 ? '🏺 Clay · click to dig' : '⛰️ Too rocky to dig');
+    } else if ((target.type === 'terrain' || target.type === 'cave') && (tool.dig || tool.family === 'pick')) {
+      const p = target.hit.point, d = Math.max(0, Math.round(heightAt(p.x, p.z) - p.y));
+      setHint(tool.dig ? `🥄 Dig soil${d ? ` · ${d} m down` : ''} · right-click to fill back in` : `⛏️ Dig into the ground${d ? ` · ${d} m down` : ''}`);
     } else setHint('');
     harvestCD -= dt;
     if (mouseL && harvestCD <= 0 && target) {
       if (target.ent) { hitEnt(target.ent, target.hit.point); harvestCD = 0.38; }
-      else if (tool.dig && target.type === 'terrain') { dig(target.hit.point); harvestCD = 0.45; }
+      else if ((tool.dig || tool.family === 'pick') && (target.type === 'terrain' || target.type === 'cave')) { digAt(target.hit, tool); harvestCD = creative ? 0.2 : 0.45; }
     }
   } else if (DEFS[item].kind === 'empty') {
     ghost.visible = false; plan = null;
@@ -4436,6 +4648,7 @@ function saveGame() {
     seed: SEED, inv, owned: [...owned], hours, dayNum, clockMode, slots, varSel, snapOn, creative, fly: P.fly, muted: A.muted, harvested,
     player: { x: P.pos.x, y: P.pos.y, z: P.pos.z, yaw: P.yaw, pitch: P.pitch },
     pieces: pieces.map(p => [p.id, p.x, p.y, p.z, +p.rot.toFixed(4), p.v]),
+    dug: [...dug],
     creatures: animals.filter(a => a.tame).map(a => [a.type, +a.home.x.toFixed(2), +a.home.z.toFixed(2), a.v, a.name || '']),
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { console.warn('save failed', e); }
@@ -4482,6 +4695,8 @@ function boot() {
     P.pos.set(0, heightAt(0, 0) + 0.5, 4);
   }
   P.camY = P.pos.y + EYE;
+  for (const k of save?.dug || []) { const [ix, iy, iz] = k.split(',').map(Number); addDug(ix, iy, iz); }
+  for (const k of colDug.keys()) { const [ix, iz] = k.split(',').map(Number); refreshOpen(ix, iz); }
   for (const r of save?.pieces || []) {
     const [id, x, y, z, rot, v] = r;
     if (DEFS[id]) createPiece({ id, x, y, z, rot, v: v || 0 });
@@ -4509,7 +4724,7 @@ function boot() {
   renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
