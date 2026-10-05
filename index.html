@@ -806,6 +806,8 @@ function buildChunk(cx, cz) {
   const ch = { cx, cz, terrain, group: new THREE.Group(), hitMeshes: [], disposables: [], disposed: false };
   ch.group.add(terrain);
   const rng = mulberry32(hash2(cx, cz, SEED));
+  const builders = pieces.filter(p => p.x > x0 - 3 && p.x < x0 + CHUNK + 3 && p.z > z0 - 3 && p.z < z0 + CHUNK + 3);
+  const builtOn = (x, z) => builders.some(p => (p.x - x) ** 2 + (p.z - z) ** 2 < 2.6);
 
   // trees
   const trees = TREE_TYPES.map(() => []);
@@ -820,7 +822,7 @@ function buildChunk(cx, cz) {
     if (h > 30) p *= 0.3;
     if (r1 > p) continue;
     const id = `t${cx},${cz},${i}`;
-    if (isHarvested(id)) continue;
+    if (isHarvested(id) || builtOn(x, z)) continue;
     const sp = (h > 17 || r2 < 0.18) ? 1 : n3(x * 0.008 - 70, z * 0.008 + 30) > 0.3 ? 2 : n1(x * 0.009 + 40, z * 0.009 - 60) > 0.3 ? 3 : 0;
     const t = sp * VARIANTS + ((r6 * VARIANTS) | 0);
     trees[t].push({ id, kind: 'tree', t, x, y: h - 0.2, z, s: 0.8 + r3 * 0.45, sy: 0.88 + ((r6 * 7) % 1) * 0.3, r: r4 * Math.PI * 2, hp: TREE_TYPES[t].hp, cv: r5 });
@@ -839,7 +841,7 @@ function buildChunk(cx, cz) {
     const h = hl(x, z);
     if (h < 0.5 || r1 > (h > 18 ? 0.8 : 0.4)) continue;
     const id = `r${cx},${cz},${i}`;
-    if (isHarvested(id)) continue;
+    if (isHarvested(id) || builtOn(x, z)) continue;
     rocks.push({ id, kind: 'rock', x, y: h - 0.2, z, s: 0.6 + r2 * 0.9, sy: 0.65 + r4 * 0.3, r: r3 * 6.28, hp: 3, cv: r4 });
   }
   if (rocks.length) {
@@ -856,7 +858,7 @@ function buildChunk(cx, cz) {
     const m = n3(x * 0.02 + 9, z * 0.02);
     if (r1 > 0.15 + Math.max(0, m) * 1.4) continue;
     const id = `f${cx},${cz},${i}`;
-    if (isHarvested(id)) continue;
+    if (isHarvested(id) || builtOn(x, z)) continue;
     const pal = (n1(x * 0.05, z * 0.05) * 0.5 + 0.5 + r3 * 0.35) * FLOWER_COLS.length;
     flowers.push({ id, kind: 'flower', x, y: h - 0.05, z, s: 0.8 + r2 * 0.5, r: r3 * 6.28, hp: 1, col: FLOWER_COLS[(pal | 0) % FLOWER_COLS.length] });
   }
@@ -873,7 +875,7 @@ function buildChunk(cx, cz) {
     if (h < 3 || r1 > (h > 14 ? 0.75 : 0.32)) continue;
     const ore = h > 24 && r2 < 0.3 ? 'gold' : h > 13 && r2 < 0.4 ? 'iron' : r2 < 0.62 ? 'copper' : 'coal';
     const id = `o${cx},${cz},${i}`;
-    if (isHarvested(id)) continue;
+    if (isHarvested(id) || builtOn(x, z)) continue;
     ores.push({ id, kind: 'ore', ore, x, y: h - 0.2, z, s: 0.65 + r3 * 0.5, sy: 0.75 + r4 * 0.3, r: r5 * 6.28, hp: ORES[ore].hp });
   }
   if (ores.length) {
@@ -948,7 +950,7 @@ scene.add(fireflies);
 const ffs = Array.from({ length: FF }, () => ({ x: 0, y: -999, z: 0, ph: Math.random() * 6.28, sp: 0.4 + Math.random() }));
 
 // particles
-const PN = 100;
+const PN = 160;
 const pMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.11, 0.11, 0.11), new THREE.MeshLambertMaterial(), PN);
 pMesh.frustumCulled = false; pMesh.raycast = () => {};
 const parts = [];
@@ -965,17 +967,32 @@ function burst(pos, hex, n = 8) {
     const pt = parts[i];
     pt.life = 0.6 + Math.random() * 0.5; pt.p.copy(pos); pt.r = Math.random() * 6;
     pt.v.set((Math.random() - 0.5) * 4, 2 + Math.random() * 3, (Math.random() - 0.5) * 4);
+    pt.g = 12; pt.size = 1;
     _c.setHex(hex); _c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.12);
     pMesh.setColorAt(i, _c);
   }
   pMesh.instanceColor.needsUpdate = true;
 }
+function puff(pos) {
+  const i = pNext; pNext = (pNext + 1) % PN;
+  const pt = parts[i];
+  pt.life = 2.6; pt.p.copy(pos); pt.r = Math.random() * 6; pt.g = -0.25; pt.size = 2.4;
+  pt.v.set((Math.random() - 0.5) * 0.3, 0.6, (Math.random() - 0.5) * 0.3);
+  pMesh.setColorAt(i, _c.setHex(0xdcdad4).offsetHSL(0, 0, (Math.random() - 0.5) * 0.08));
+  pMesh.instanceColor.needsUpdate = true;
+}
+let smokeT = 0;
 function updateParticles(dt) {
+  if ((smokeT -= dt) <= 0) {
+    smokeT = 0.35;
+    for (const rec of smokePieces) if ((rec.x - P.pos.x) ** 2 + (rec.z - P.pos.z) ** 2 < 4900) puff(rec.smokePos);
+  }
   for (let i = 0; i < PN; i++) {
     const pt = parts[i];
     if (pt.life <= 0) continue;
-    pt.life -= dt; pt.v.y -= 12 * dt; pt.p.addScaledVector(pt.v, dt); pt.r += dt * 5;
-    const s = pt.life > 0 ? Math.min(1, pt.life * 3) : 0;
+    pt.life -= dt; pt.v.y -= (pt.g ?? 12) * dt; pt.p.addScaledVector(pt.v, dt); pt.r += dt * (pt.size > 1 ? 0.6 : 5);
+    if (pt.size > 1) pt.v.x += 0.25 * dt;
+    const s = pt.life <= 0 ? 0 : pt.size > 1 ? pt.size * (1 + (2.6 - pt.life) * 0.45) * Math.min(1, pt.life) : Math.min(1, pt.life * 3);
     _q.setFromAxisAngle(UP, pt.r);
     pMesh.setMatrixAt(i, _m.compose(pt.p, _q, _s.setScalar(s)));
   }
@@ -1472,6 +1489,122 @@ DEF_LIST.push(
       return { parts: [B(0.8, 0.9, 0.8, 0, 0.45, 0, 0xe8e2d6), B(0.86, 0.08, 0.86, 0, 0.9, 0, 0xd8d2c6), colGeo(body, c), colGeo(head, c), B(0.1, 0.04, 0.16, 0, 1.37, 0.43, dk(c, 0.85)), B(0.12, 0.08, 0.16, 0, 1.15, -0.38, c, -0.5)] };
     } },
 );
+// ---------------------------------------------------------------- more roof shapes
+// A roof surface from triangles (given as [x,y,z] corners): a shingled top plus an underside.
+function roofSurface(tris, c, th = 0.12) {
+  const pos = [], a = new V3(), b = new V3(), d = new V3(), n = new V3();
+  for (const [p, q, r] of tris) {
+    a.set(...p); b.set(...q); d.set(...r);
+    n.subVectors(b, a).cross(d.clone().sub(a));
+    const [B2, C2] = n.y < 0 ? [d, b] : [b, d];
+    pos.push(a.x, a.y, a.z, B2.x, B2.y, B2.z, C2.x, C2.y, C2.z);
+    pos.push(a.x, a.y - th, a.z, C2.x, C2.y - th, C2.z, B2.x, B2.y - th, B2.z);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return colGeo(g, c, 0.07);
+}
+const ROOF_STEPS = [0, 1, 2, 3].map(k => [-1, k * 0.5, 1 - (k + 1) * 0.5, 1, k * 0.5 + 0.6, 1 - k * 0.5]);
+DEF_LIST.push(
+  { id: 'roofcorner', name: 'Roof Corner (Outer)', short: 'Hip corner', icon: '📐', cat: 'Roofs', snap: 'cell', pal: ROOF, cost: { wood: 2 },
+    boxes: [[-1, 0, -1, 1, 0.5, 1], [-1, 0.5, -1, 0.5, 1.0, 0.5], [-1, 1.0, -1, 0, 1.5, 0], [-1, 1.5, -1, -0.5, 2.0, -0.5]],
+    build: c => ({ parts: [roofSurface([[[-1, 2.08, -1], [-1.08, 0, 1.08], [1.08, 0, 1.08]], [[-1, 2.08, -1], [1.08, 0, 1.08], [1.08, 0, -1.08]]], c),
+      colGeo(limb(0.07, 0.07, new V3(1.08, 0.04, 1.08), new V3(-1, 2.12, -1), 5), dk(c, 0.7))] }) },
+  { id: 'roofinner', name: 'Roof Corner (Inner)', short: 'Valley', icon: '🔽', cat: 'Roofs', snap: 'cell', pal: ROOF, cost: { wood: 2 },
+    boxes: [[-1, 0, -1, 1, 0.5, 1], [-1, 0.5, -1, 1, 1.0, 0.5], [-1, 0.5, -1, 0.5, 1.0, 1], [-1, 1.0, -1, 1, 1.5, 0], [-1, 1.0, -1, 0, 1.5, 1], [-1, 1.5, -1, 1, 2, -0.5], [-1, 1.5, -1, -0.5, 2, 1]],
+    build: c => ({ parts: [roofSurface([[[-1, 2.08, -1], [-1.0, 2.08, 1.0], [1.08, 0, 1.08]], [[-1, 2.08, -1], [1.08, 0, 1.08], [1.0, 2.08, -1.0]]], c)] }) },
+  { id: 'pyroof', name: 'Pyramid Roof', short: 'Pyramid', icon: '🔺', cat: 'Roofs', snap: 'cell', pal: ROOF, cost: { wood: 3 },
+    boxes: [[-1, 0, -1, 1, 0.4, 1], [-0.6, 0.4, -0.6, 0.6, 0.9, 0.6], [-0.25, 0.9, -0.25, 0.25, 1.45, 0.25]],
+    build: c => {
+      const o = 1.12, top = [0, 1.55, 0], k = [[-o, 0, -o], [o, 0, -o], [o, 0, o], [-o, 0, o]];
+      return { parts: [roofSurface(k.map((p, i) => [top, p, k[(i + 1) % 4]]), c), Ic(0.09, 0, 1.6, 0, dk(c, 0.7), 0), Cy(0.025, 0.025, 0.4, 5, 0, 1.75, 0, 0xc8a24a)] };
+    } },
+  { id: 'roofhalf', name: 'Low Roof Slope', short: 'Low roof', icon: '📉', cat: 'Roofs', snap: 'cell', pal: ROOF, cost: { wood: 2 },
+    boxes: [[-1, 0, 0, 1, 0.6, 1], [-1, 0.45, -1, 1, 1.1, 0]],
+    build: c => {
+      const g = mergeGeometries([B(2, 0.12, 2.5, 0, 0, 0, c), ...[0, 1, 2, 3, 4].map(i => B(2, 0.04, 0.09, 0, 0.075, -1.0 + i * 0.5, dk(c, 0.8))), B(2, 0.2, 0.07, 0, -0.03, 1.25, dk(c, 0.6))]);
+      g.rotateX(Math.atan2(1, 2)); g.translate(0, 0.56, 0);
+      return { parts: [g] };
+    } },
+  { id: 'gablelow', name: 'Low Gable End', short: 'Low gable', icon: '◢', cat: 'Roofs', snap: 'edge', pal: WOOD, cost: { wood: 1 },
+    boxes: [[-1, 0, -0.1, 1, 0.5, 0.1], [0, 0.5, -0.1, 1, 1, 0.1]],
+    build: c => {
+      const sh = new THREE.Shape(); sh.moveTo(-1, 0); sh.lineTo(1, 0); sh.lineTo(1, 1); sh.closePath();
+      return { parts: [ext(sh, 0.2, c), B(2, 0.1, 0.24, 0, 0.05, 0, dk(c))] };
+    } },
+  { id: 'chimney', name: 'Chimney', short: 'Chimney', icon: '🏭', cat: 'Roofs', snap: 'free', pal: STONE, cost: { stone: 4 }, smokeY: 2.75,
+    boxes: [[-0.3, 0, -0.3, 0.3, 2.6, 0.3]],
+    build: c => ({ parts: [colGeo(new THREE.BoxGeometry(0.6, 2.5, 0.6).translate(0, 1.25, 0), c, 0.12), B(0.72, 0.14, 0.72, 0, 2.52, 0, dk(c, 0.8)),
+      ...[0.5, 1.1, 1.7].map(y => B(0.62, 0.03, 0.62, 0, y, 0, dk(c, 0.75))), B(0.4, 0.06, 0.4, 0, 2.6, 0, 0x2a2420)] }) },
+);
+
+// ---------------------------------------------------------------- preset buildings
+// A blueprint is a list of [part, dx, dy, dz, rotation, colour] relative to its origin cell. dy 'g' means "on the ground".
+const Q = Math.PI / 2;
+function houseBP(o) {
+  const { w, d, wall = 'wall', wallV = 0, win = 'window', winV = wallV, door = 'door', doorV = wallV, roof = 'roof', roofV = 0, gable = 'gable', gableV = wallV,
+    found = 'foundation', foundV = 0, floor = 'floor', floorV = 0, windows = true, chimney = null } = o;
+  const P = [], wy = 0.5 + (floor ? 0.2 : 0), top = wy + 2.4, half = d / 2, mid = Math.floor((w - 1) / 2);
+  for (let i = 0; i < w; i++) for (let j = 0; j < d; j++) {
+    P.push([found, i * 2, 0, j * 2, 0, foundV]);
+    if (floor) P.push([floor, i * 2, 0.5, j * 2, 0, floorV]);
+  }
+  const W = useWin => useWin && windows ? [win, winV] : [wall, wallV];
+  for (let i = 0; i < w; i++) {
+    const [fid, fv] = i === mid ? [door, doorV] : W(true), [bid, bv] = W(i % 2 === 0);
+    P.push([fid, i * 2, wy, d * 2 - 1, 0, fv]);
+    P.push([bid, i * 2, wy, -1, 0, bv]);
+  }
+  for (let j = 0; j < d; j++) for (const x of [-1, w * 2 - 1]) { const [id, v] = W(j === Math.floor(d / 2)); P.push([id, x, wy, j * 2, Q, v]); }
+  for (let i = 0; i < w; i++) for (let k = 0; k < half; k++) {
+    P.push([roof, i * 2, top + 2 * k, (d - 1 - k) * 2, 0, roofV]);
+    P.push([roof, i * 2, top + 2 * k, k * 2, Math.PI, roofV]);
+  }
+  for (let j = 0; j < d; j++) for (const x of [-1, w * 2 - 1]) {
+    const back = j < half, k = back ? j : d - 1 - j;
+    for (let m = 0; m < k; m++) P.push([wall, x, top + 2 * m, j * 2, Q, wallV]);
+    P.push([gable, x, top + 2 * k, j * 2, back ? 3 * Q : Q, gableV]);
+  }
+  if (chimney) P.push(['chimney', ...chimney]);
+  return P.concat(o.extras || []);
+}
+const BLUEPRINTS = [
+  { id: 'bp_cottage', name: 'Cosy Cottage', icon: '🏡', desc: '2×2 with bed, table and garden path',
+    pieces: houseBP({ w: 2, d: 2, wallV: 0, roofV: 0, extras: [['bed', 2.3, 0.7, 0.25, 0, 0], ['shelf', -0.25, 0.7, -0.72, 0, 1], ['table', 0.3, 0.7, 1.5, 0, 0], ['rug', 1.3, 0.7, 1.3, 0, 4],
+      ['path', 0, 'g', 5, 0, 0], ['path', 0, 'g', 7, 0, 0], ['lantern', -1.6, 'g', 4.2, 0, 1], ['flowerbed', 2, 'g', 5, 0, 0]] }) },
+  { id: 'bp_stone', name: 'Stone Cottage', icon: '🏰', desc: 'Stone walls, round windows, fireplace and chimney',
+    pieces: houseBP({ w: 2, d: 2, wall: 'stonewall', wallV: 0, win: 'roundwindow', winV: 0, door: 'archway', doorV: 0, roofV: 1, gable: 'gable', gableV: 1, chimney: [2.4, 3.1, -0.55, 0, 0],
+      extras: [['fireplace', 2.2, 0.7, -0.62, 0, 0], ['armchair', 1.4, 0.7, 0.9, Math.PI, 3], ['rug', 1.6, 0.7, 0.4, 0, 2], ['bed', -0.25, 0.7, 1.7, Q, 3], ['candles', 0.2, 0.7, -0.5, 0, 0]] }) },
+  { id: 'bp_farmhouse', name: 'Farmhouse', icon: '🏘️', desc: '3×2 timber-frame house with thatch, kitchen and veg patch',
+    pieces: houseBP({ w: 3, d: 2, wall: 'tudorwall', wallV: 1, win: 'window', winV: 6, door: 'door', doorV: 1, roofV: 3, gableV: 6, chimney: [4.4, 3.1, -0.55, 0, 0],
+      extras: [['counter', 3.4, 0.7, -0.6, 0, 0], ['counter', 4.4, 0.7, -0.6, 0, 0], ['table', 2.6, 0.7, 1.6, 0, 1], ['bench', 2.6, 0.7, 2.4, Math.PI, 1], ['bed', -0.2, 0.7, 0.3, 0, 1], ['shelf', 1.2, 0.7, -0.72, 0, 1],
+        ['vegpatch', 0, 'g', 6, 0, 1], ['vegpatch', 2, 'g', 6, 0, 0], ['vegpatch', 4, 'g', 6, 0, 2], ['haybale', 6.6, 'g', 1, Q, 0], ['barrel', 6.4, 'g', 3, 0, 1]] }) },
+  { id: 'bp_barn', name: 'Big Barn', icon: '🛖', desc: '3×4 barn with a tall roof, hay and barrels',
+    pieces: houseBP({ w: 3, d: 4, wallV: 1, windows: false, roofV: 8, gableV: 1, floor: null,
+      extras: [['haybale', 0, 0.5, 0, 0, 0], ['haybale', 0, 1.0, 0, 0, 0], ['haybale', 1, 0.5, 0.2, Q, 1], ['haybale', 4, 0.5, 0, 0, 0], ['barrel', 4.4, 0.5, 4.5, 0, 0], ['barrel', 3.7, 0.5, 4.8, 0, 0], ['crate', 0, 0.5, 5, 0, 1], ['lantern', 2, 0.5, 2.8, 0, 1]] }) },
+  { id: 'bp_greenhouse', name: 'Greenhouse', icon: '🌱', desc: 'Glass walls, copper roof, planters inside',
+    pieces: houseBP({ w: 2, d: 2, wall: 'glasswall', wallV: 6, win: 'glasswall', winV: 6, door: 'door', doorV: 6, roof: 'copperroof', roofV: 0, gable: 'gable', gableV: 6, floor: 'tilefloor', floorV: 1,
+      extras: [['vegpatch', 0, 0.7, 0, 0, 2], ['flowerbed', 2, 0.7, 0, 0, 4], ['houseplant', 2.4, 0.7, 2.2, 0, 0], ['pot', 0.2, 0.7, 2.3, 0, 0], ['pot', -0.4, 0.7, 2.0, 0, 3]] }) },
+  { id: 'bp_tower', name: 'Lookout Tower', icon: '🗼', desc: 'Two-storey stone tower with a pyramid roof (fly up!)',
+    pieces: [['foundation', 0, 0, 0, 0, 0], ['floor', 0, 0.5, 0, 0, 1], ['archway', 0, 0.7, 1, 0, 0], ['stonewall', 0, 0.7, -1, 0, 0], ['stonewall', -1, 0.7, 0, Q, 0], ['stonewall', 1, 0.7, 0, Q, 0],
+      ['floor', 0, 3.1, 0, 0, 1], ['roundwindow', 0, 3.3, 1, 0, 0], ['roundwindow', 0, 3.3, -1, 0, 0], ['roundwindow', -1, 3.3, 0, Q, 0], ['roundwindow', 1, 3.3, 0, Q, 0],
+      ['pyroof', 0, 5.7, 0, 0, 1], ['lantern', 0, 3.3, 0, 0, 1], ['lantern', 1.6, 'g', 1.6, 0, 0]] },
+  { id: 'bp_gazebo', name: 'Garden Gazebo', icon: '⛺', desc: 'Open 2×2 deck with pillars, railings and a hipped roof',
+    pieces: [['deck', 0, 0, 0, 0, 2], ['deck', 2, 0, 0, 0, 2], ['deck', 0, 0, 2, 0, 2], ['deck', 2, 0, 2, 0, 2],
+      ...[[-1, -1], [3, -1], [-1, 3], [3, 3], [1, -1], [1, 3], [-1, 1], [3, 1]].map(([x, z]) => ['pillar', x, 0.2, z, 0, 2]),
+      ['railing', 0, 0.2, -1, 0, 0], ['railing', 2, 0.2, -1, 0, 0], ['railing', -1, 0.2, 0, Q, 0], ['railing', -1, 0.2, 2, Q, 0], ['railing', 3, 0.2, 0, Q, 0], ['railing', 3, 0.2, 2, Q, 0],
+      ['roofcorner', 0, 2.6, 0, Math.PI, 0], ['roofcorner', 2, 2.6, 0, Q, 0], ['roofcorner', 0, 2.6, 2, 3 * Q, 0], ['roofcorner', 2, 2.6, 2, 0, 0],
+      ['bench', 1, 0.2, -0.3, 0, 2], ['table', 1, 0.2, 1, 0, 2], ['stringlights', 0, 'g', 5, 0, 1], ['pot', -1.6, 'g', 3.5, 0, 0], ['pot', 3.6, 'g', 3.5, 0, 2]] },
+  { id: 'bp_stall', name: 'Market Stall', icon: '🏪', desc: 'Little covered stall with a counter, crates and barrels',
+    pieces: [['tilefloor', 0, 0, 0, 0, 0], ...[[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([x, z]) => ['pillar', x, 0.2, z, 0, 3]), ['pyroof', 0, 2.6, 0, 0, 4],
+      ['counter', 0, 0.2, 0.55, Math.PI, 3], ['crate', -0.55, 0.2, -0.5, 0, 0], ['barrel', 0.6, 0.2, -0.5, 0, 1], ['lantern', 1.6, 'g', 1.6, 0, 0], ['pot', -1.5, 'g', 1.6, 0, 1]] },
+  { id: 'bp_garden', name: 'Kitchen Garden', icon: '🥕', desc: 'Fenced 3×3 plot with veg patches, flowers and a gate',
+    pieces: [...[0, 2, 4].flatMap(x => [['picket', x, 'g', -1, 0, 0], [x === 2 ? 'gate' : 'picket', x, 'g', 5, 0, 0]]), ...[0, 2, 4].flatMap(z => [['picket', -1, 'g', z, Q, 0], ['picket', 5, 'g', z, Q, 0]]),
+      ['vegpatch', 0, 'g', 0, 0, 0], ['vegpatch', 2, 'g', 0, 0, 1], ['vegpatch', 4, 'g', 0, 0, 2], ['flowerbed', 0, 'g', 2, 0, 0], ['flowerbed', 4, 'g', 2, 0, 4], ['path', 2, 'g', 2, 0, 1], ['path', 2, 'g', 4, 0, 1],
+      ['vegpatch', 0, 'g', 4, 0, 1], ['vegpatch', 4, 'g', 4, 0, 0], ['haybale', 6.3, 'g', 0.5, Q, 0], ['birdhouse', 5.8, 'g', 4.6, 0, 2]] },
+];
+for (const bp of BLUEPRINTS) DEF_LIST.push({ ...bp, kind: 'blueprint', short: bp.name.split(' ').pop(), cat: 'Buildings', pal: [['Preset', 0xffffff]] });
 // creatures you can release from the catalog (models and behaviour live in the animals section)
 const DRAGON_PAL = [['Emerald', 0x3a8a5a], ['Ruby', 0xb43a3a], ['Amethyst', 0x7a4aa8], ['Sapphire', 0x3a5aa8], ['Gold', 0xd8a83a], ['Shadow', 0x3a3a44]];
 const DINO_PAL = [['Forest', 0x5a8a4a], ['Sand', 0xc8a86a], ['Teal', 0x4a8a8a], ['Rust', 0xa8583a], ['Purple', 0x7a5a9a]];
@@ -1499,7 +1632,11 @@ for (const [cat, list] of [
     ['stego', 'Stegosaurus', '🦎', DINO_PAL], ['bronto', 'Brontosaurus', '🦕', DINO_PAL]]],
 ]) for (const [type, name, icon, pal] of list) DEF_LIST.push({ id: 'c_' + type, kind: 'creature', type, name, short: name.replace('Baby ', 'Baby '), icon, cat, pal });
 const DEFS = Object.fromEntries(DEF_LIST.map(d => [d.id, d]));
-const CATS = ['Tools', 'Crafting', 'Walls', 'Floors & Stairs', 'Roofs', 'Furniture', 'Lighting', 'Garden', 'Animals', 'People', 'Creatures'];
+for (const d of DEF_LIST) if (d.kind === 'blueprint') {
+  d.cost = {};
+  for (const [id] of d.pieces) for (const [k, v] of Object.entries(DEFS[id].cost || {})) d.cost[k] = (d.cost[k] || 0) + v;
+}
+const CATS = ['Tools', 'Crafting', 'Buildings', 'Walls', 'Floors & Stairs', 'Roofs', 'Furniture', 'Lighting', 'Garden', 'Animals', 'People', 'Creatures'];
 
 const glowMats = {
   lamp: new THREE.MeshStandardMaterial({ color: 0xffe2a8, emissive: 0xffb347, emissiveIntensity: 0.6 }),
@@ -1559,6 +1696,7 @@ const piecesGroup = new THREE.Group();
 scene.add(piecesGroup);
 const pieces = [];
 const glowPieces = [];
+const smokePieces = [];
 function createPiece(rec) {
   const def = DEFS[rec.id];
   if (!def) return null;
@@ -1574,6 +1712,7 @@ function createPiece(rec) {
     mesh.add(gm);
     if (def.lightY) { rec.lightPos = new V3(rec.x, rec.y + def.lightY, rec.z); rec.kind = def.glow; glowPieces.push(rec); }
   }
+  if (def.smokeY) { rec.smokePos = new V3(rec.x, rec.y + def.smokeY, rec.z); smokePieces.push(rec); }
   piecesGroup.add(mesh);
   rec.mesh = mesh;
   rec.boxes = worldBoxes(def, rec.x, rec.y, rec.z, rec.rot);
@@ -1590,6 +1729,8 @@ function removePiece(rec) {
   pieces.splice(pieces.indexOf(rec), 1);
   const gi = glowPieces.indexOf(rec);
   if (gi >= 0) glowPieces.splice(gi, 1);
+  const si = smokePieces.indexOf(rec);
+  if (si >= 0) smokePieces.splice(si, 1);
 }
 
 // point-light pool for lanterns and fires
@@ -1754,6 +1895,7 @@ function partThumb(id, v) {
   }
   let grp;
   if (DEFS[id].kind === 'creature') grp = buildCreature(DEFS[id].type, v).g;
+  else if (DEFS[id].kind === 'blueprint') grp = blueprintGroup(DEFS[id]);
   else {
     const { g, glow } = pieceGeo(id, v);
     grp = new THREE.Group();
@@ -1788,7 +1930,7 @@ function renderHotbar() {
     hb.appendChild(el);
   });
   const d = DEFS[curItem()];
-  $('selname').innerHTML = d.kind === 'empty' ? `✋ Empty hands <span>· click or E to open, sit, pet, chat and pick flowers</span>` : d.kind === 'tool' ? `${d.icon} ${d.name} <span>· ${TOOL_DESC[d.id]}</span>` : d.kind === 'creature' ? `${d.icon} ${d.name} · ${d.pal[curVar(d.id)][0]} <span>· click the ground to release · right-click sends one away</span>` : d.pal ? `${d.icon} ${d.name} · ${d.pal[curVar(d.id)][0]} <span>· ${creative ? '✨ free' : costStr(d.cost)} · ${snapOn ? '🧲 snap' : '✋ free'}</span>` : `${d.icon} ${d.name} <span>· chop trees, mine rocks, pick flowers</span>`;
+  $('selname').innerHTML = d.kind === 'blueprint' ? `${d.icon} ${d.name} <span>· ${d.desc} · ${creative ? '✨ free' : costStr(d.cost)}</span>` : d.kind === 'empty' ? `✋ Empty hands <span>· click or E to open, sit, pet, chat and pick flowers</span>` : d.kind === 'tool' ? `${d.icon} ${d.name} <span>· ${TOOL_DESC[d.id]}</span>` : d.kind === 'creature' ? `${d.icon} ${d.name} · ${d.pal[curVar(d.id)][0]} <span>· click the ground to release · right-click sends one away</span>` : d.pal ? `${d.icon} ${d.name} · ${d.pal[curVar(d.id)][0]} <span>· ${creative ? '✨ free' : costStr(d.cost)} · ${snapOn ? '🧲 snap' : '✋ free'}</span>` : `${d.icon} ${d.name} <span>· chop trees, mine rocks, pick flowers</span>`;
 }
 function onSlotChange() { renderHotbar(); sfx('ui'); }
 function cycleColor() {
@@ -1854,7 +1996,7 @@ function buildCatalog() {
     const locked = d.kind === 'tool' && !owned.has(d.id) && !creative;
     if (locked) el.classList.add('poor');
     el.innerHTML = `${d.pal ? partPic(d) : `<div class="i">${d.icon}</div>`}<div class="n">${d.name}</div><div class="c">${d.kind === 'tool' ? (locked ? '🔒 make at a workbench' : TOOL_DESC[d.id]) : d.kind === 'creature' ? 'click to release' : !d.cost ? 'gather resources' : creative ? '✨ free' : costStr(d.cost)}</div>`;
-    if (d.pal && d.kind !== 'tool') {
+    if (d.pal && d.kind !== 'tool' && d.kind !== 'blueprint') {
       const sws = document.createElement('div'); sws.className = 'sws';
       d.pal.forEach(([name, col], i) => {
         const sw = document.createElement('span');
@@ -2143,11 +2285,23 @@ const ghost = new THREE.Group();
 ghost.visible = false;
 scene.add(ghost);
 let ghostKey = '';
+function blueprintGroup(def, mat) {
+  const g = new THREE.Group();
+  for (const [id, dx, dy, dz, r, v] of def.pieces) {
+    const { g: geo, glow } = pieceGeo(id, v || 0);
+    const m = new THREE.Mesh(geo, mat || matVC);
+    m.position.set(dx, dy === 'g' ? 0 : dy, dz); m.rotation.y = r; m.renderOrder = 5;
+    if (glow) { const gm = new THREE.Mesh(glow, mat || glowMats[DEFS[id].glow]); gm.renderOrder = 5; m.add(gm); }
+    g.add(m);
+  }
+  return g;
+}
 function setGhost(id, v) {
   const key = id + '|' + v;
   if (key === ghostKey) return;
   ghostKey = key;
   ghost.clear();
+  if (DEFS[id].kind === 'blueprint') { ghost.add(blueprintGroup(DEFS[id], ghostMat)); return; }
   if (DEFS[id].kind) return;
   const { g, glow } = pieceGeo(id, v);
   const m = new THREE.Mesh(g, ghostMat); m.renderOrder = 5; ghost.add(m);
@@ -2199,6 +2353,15 @@ function computePlan(def) {
   const onTop = _n.y > 0.6;
   let baseY = hp ? (onTop ? p.y : hp.y) : null;
   const yawSnap = Math.round(viewYaw() / (Math.PI / 2)) * (Math.PI / 2);
+  if (def.kind === 'blueprint') {
+    const x = Math.round(_b.x / 2) * 2, z = Math.round(_b.z / 2) * 2;
+    const rot = (((yawSnap + rotIdx * Math.PI / 2) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2), c = Math.cos(rot), s = Math.sin(rot);
+    let y = -1e9;
+    for (const [id, dx, dy, dz] of def.pieces) if (dy !== 'g' && DEFS[id].snap !== 'free') y = Math.max(y, heightAt(x + dx * c + dz * s, z - dx * s + dz * c));
+    y = Math.round(y * 100) / 100;
+    const valid = canAfford(def.cost);
+    return { x, y, z, rot, valid, reason: valid ? '' : `Need ${costStr(def.cost)}`, snapTo: null, blueprint: true };
+  }
   let x, z, rot, snapTo = null;
   if (!snapOn) {
     x = Math.round(_b.x * 20) / 20; z = Math.round(_b.z * 20) / 20;
@@ -2281,9 +2444,23 @@ function primary() {
   if (!plan.valid) { sfx('deny'); toast(plan.reason); return; }
   if (!creative) for (const [k, v] of Object.entries(def.cost || {})) inv[k] -= v;
   updateInv();
+  if (def.kind === 'blueprint') { placeBlueprint(def, plan); return; }
   createPiece({ id: def.id, x: plan.x, y: plan.y, z: plan.z, rot: plan.rot, v: curVar(def.id) });
   sfx('place');
   burst(new V3(plan.x, plan.y + 0.2, plan.z), 0xe9d8b8, 6);
+  dirty = true;
+}
+function placeBlueprint(def, plan) {
+  const c = Math.cos(plan.rot), s = Math.sin(plan.rot), r3 = v => Math.round(v * 1000) / 1000;
+  for (const [id, dx, dy, dz, rr, v] of def.pieces) {
+    const x = r3(plan.x + dx * c + dz * s), z = r3(plan.z - dx * s + dz * c);
+    createPiece({ id, x, y: dy === 'g' ? r3(heightAt(x, z)) : r3(plan.y + dy), z, rot: r3((((rr + plan.rot) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)), v: v || 0 });
+  }
+  sfx('place'); sfx('pick');
+  burst(new V3(plan.x + 1, plan.y + 1.5, plan.z + 1), 0xfff3a0, 24);
+  const xs = pieces.slice(-def.pieces.length), minX = Math.min(...xs.map(p => p.x)) - 1.5, maxX = Math.max(...xs.map(p => p.x)) + 1.5, minZ = Math.min(...xs.map(p => p.z)) - 1.5, maxZ = Math.max(...xs.map(p => p.z)) + 1.5;
+  for (const ch of chunks.values()) for (const m of ch.hitMeshes) for (const e of m.userData.list) if (!e.gone && e.x > minX && e.x < maxX && e.z > minZ && e.z < maxZ) { e.gone = true; setEntMatrix(e, null, 0, 0); }
+  toast(`🏗️ ${def.name} built!`);
   dirty = true;
 }
 function secondary() {
@@ -3524,6 +3701,7 @@ function updateInteraction(dt) {
       ghost.rotation.y = plan.rot;
       ghostMat.color.setHex(!plan.valid ? 0xff7b6b : plan.snapTo ? 0x8fd8ff : 0x8dffb0);
       if (!plan.valid) setHint(plan.reason, true);
+      else if (plan.blueprint) setHint(`🏗️ Place ${def.name} · R to rotate · ${creative ? 'free' : costStr(def.cost)}`);
       else if (plan.snapTo) setHint(`🧲 Snapped to ${DEFS[plan.snapTo.id].name}${target.type === 'piece' ? ' · right-click removes it' : ''}`);
       else setHint(snapOn ? '' : '✋ Free placement · G to snap');
     } else { ghost.visible = false; setHint(''); }
@@ -3648,7 +3826,7 @@ function boot() {
   renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
