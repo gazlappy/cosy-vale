@@ -140,7 +140,7 @@
 <div id="menu" class="overlay"><div class="card panel">
   <h1>🌿 Cosy Vale</h1>
   <p class="sub">Wander an endless valley, gather what you need, and build a little home.</p>
-  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button></div>
+  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
   <div class="controls">
     <kbd>WASD</kbd><span>Walk</span><kbd>Mouse</kbd><span>Look around</span>
     <kbd>Shift</kbd><span>Run</span><kbd>Space</kbd><span>Jump / swim up</span>
@@ -162,6 +162,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
 const $ = id => document.getElementById(id);
 const V3 = THREE.Vector3;
@@ -224,7 +225,8 @@ function fbm(nz, x, z, oct) {
 }
 
 // ---------------------------------------------------------------- terrain function
-const CHUNK = 48, SEG = 24, STEP = CHUNK / SEG, VIEW = 4, WATER = 0;
+const CHUNK = 48, SEG = 24, STEP = CHUNK / SEG, WATER = 0;
+let VIEW = 4, grassDensity = 1, fogNear = 90, fogFar = 185;
 
 function heightRaw(x, z) {
   const cont = fbm(n1, x * 0.0016, z * 0.0016, 3);
@@ -308,6 +310,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'h
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
+renderer.xr.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
@@ -317,6 +320,10 @@ const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xcfe8f3, 90, 185);
 const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.08, 1200);
 camera.rotation.order = 'YXZ';
+const rig = new THREE.Group();
+scene.add(rig);
+rig.add(camera);
+const camPos = new V3();
 
 const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
 composer.setPixelRatio(renderer.getPixelRatio());
@@ -661,7 +668,7 @@ function buildGrass(ch, dense) {
     return false;
   };
   const rng = mulberry32(hash2(ch.cx, ch.cz, SEED + (dense ? 11 : 5)));
-  const count = dense ? 4500 : 260, list = [];
+  const count = dense ? Math.round(4500 * grassDensity) : 260, list = [];
   for (let i = 0; i < count; i++) {
     const x = x0 + rng() * CHUNK, z = z0 + rng() * CHUNK, r1 = rng(), r2 = rng(), r3 = rng(), r4 = rng();
     const h = ch.hl(x, z);
@@ -1695,7 +1702,7 @@ function toggleMute() {
 
 // ---------------------------------------------------------------- HUD
 let toastTimer = 0;
-function toast(msg) { const el = $('toast'); el.textContent = msg; el.classList.add('show'); toastTimer = 1.8; }
+function toast(msg) { wristText.toast = msg; const el = $('toast'); el.textContent = msg; el.classList.add('show'); toastTimer = 1.8; }
 const hexCss = c => '#' + new THREE.Color(c).getHexString(THREE.SRGBColorSpace);
 const RES = {
   wood: ['🌲', 'Wood'], stone: ['⛰️', 'Stone'], petals: ['🌸', 'Petals'], coal: ['⚫', 'Coal'], copperOre: ['🟠', 'Copper ore'], ironOre: ['🟤', 'Iron ore'],
@@ -1786,6 +1793,7 @@ function cycleColor() {
 }
 let lastHint = '';
 function setHint(text, bad = false) {
+  wristText.hint = text;
   const key = text + bad;
   if (key === lastHint) return;
   lastHint = key;
@@ -1850,7 +1858,7 @@ function buildCatalog() {
   body.appendChild(grid);
 }
 $('catSearch').addEventListener('input', buildCatalog);
-function openCatalog() { if (curSlot < 0) curSlot = 0; catalogOpen = true; freeMode = false; const cur = DEFS[curItem()]; if (cur && cur.cat !== 'Tools') catTab = cur.cat; $('catSearch').value = ''; buildCatalog(); $('catalog').classList.remove('hidden'); if (document.pointerLockElement) document.exitPointerLock(); }
+function openCatalog() { if (xrOn) { vrOpen('catalog'); return; } if (curSlot < 0) curSlot = 0; catalogOpen = true; freeMode = false; const cur = DEFS[curItem()]; if (cur && cur.cat !== 'Tools') catTab = cur.cat; $('catSearch').value = ''; buildCatalog(); $('catalog').classList.remove('hidden'); if (document.pointerLockElement) document.exitPointerLock(); }
 function closeCatalog(relock) { catalogOpen = false; $('catSearch').blur(); $('catalog').classList.add('hidden'); if (relock) lock(); }
 
 // ---------------------------------------------------------------- crafting (workbench & furnace)
@@ -1923,6 +1931,7 @@ function craft(r, n) {
   updateInv(); renderCraft(); dirty = true;
 }
 function openCraft(st) {
+  if (xrOn) { vrOpen('craft', st); return; }
   craftStation = st; craftOpen = true; freeMode = false; document.body.classList.remove('free');
   renderCraft(); $('craft').classList.remove('hidden');
   if (document.pointerLockElement) document.exitPointerLock();
@@ -1965,6 +1974,7 @@ function renderBag() {
   }
 }
 function openBag() {
+  if (xrOn) { vrOpen('bag'); return; }
   bagOpen = true; freeMode = false; document.body.classList.remove('free');
   renderBag(); $('bag').classList.remove('hidden');
   if (document.pointerLockElement) document.exitPointerLock();
@@ -1978,7 +1988,6 @@ function dig(p) {
 }
 
 // the tool in your hand, bottom-right of the view; it swings when you use it
-scene.add(camera);
 const vm = new THREE.Group();
 vm.position.set(0.34, -0.33, -0.58);
 camera.add(vm);
@@ -1991,6 +2000,7 @@ function updateViewModel(dt) {
   }
   vmSwing = Math.max(0, vmSwing - dt * 4);
   const s = Math.sin(vmSwing * Math.PI);
+  if (xrOn) { vm.position.set(0, -0.01, 0.03); vm.rotation.set(-1.25 - s * 1.0, 0, 0); return; }
   vm.rotation.set(-0.35 - s * 1.1, 0.35, 0.25 + s * 0.2);
   vm.position.y = -0.34 + (P.onGround && !P.fly ? Math.sin(P.bob * 2) * 0.008 : 0);
 }
@@ -2146,7 +2156,8 @@ function nearObjects(withEnts) {
 }
 function findTarget() {
   const hand = !!toolOf(curItem()) || DEFS[curItem()].kind === 'empty';
-  ray.setFromCamera(CENTER, camera);
+  if (xrOn && UI.open) return null;
+  aimRay();
   const crit = DEFS[curItem()].kind === 'creature';
   ray.far = hand ? 6 : crit ? 14 : 9;
   const objs = nearObjects(hand);
@@ -2176,11 +2187,11 @@ function computePlan(def) {
   const hp = target.type === 'piece' ? target.piece : null;
   const onTop = _n.y > 0.6;
   let baseY = hp ? (onTop ? p.y : hp.y) : null;
-  const yawSnap = Math.round(P.yaw / (Math.PI / 2)) * (Math.PI / 2);
+  const yawSnap = Math.round(viewYaw() / (Math.PI / 2)) * (Math.PI / 2);
   let x, z, rot, snapTo = null;
   if (!snapOn) {
     x = Math.round(_b.x * 20) / 20; z = Math.round(_b.z * 20) / 20;
-    rot = Math.round(P.yaw / (Math.PI / 12)) * (Math.PI / 12) + rotIdx * Math.PI / 12;
+    rot = Math.round(viewYaw() / (Math.PI / 12)) * (Math.PI / 12) + rotIdx * Math.PI / 12;
     if (baseY === null) baseY = p.y;
   } else if (def.snap === 'cell') {
     x = Math.round(_b.x / 2) * 2; z = Math.round(_b.z / 2) * 2;
@@ -2410,12 +2421,13 @@ function collideXZ() {
 }
 let stepPhase = 0;
 function updatePlayer(dt) {
-  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
-  const s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-  const sy = Math.sin(P.yaw), cy = Math.cos(P.yaw);
+  let f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+  let s = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  if (xrOn) { f = -xrIn.y; s = xrIn.x; }
+  const my = viewYaw(), sy = Math.sin(my), cy = Math.cos(my);
   let wx = -sy * f + cy * s, wz = -cy * f - sy * s;
   const wl = Math.hypot(wx, wz);
-  if (wl > 0) { wx /= wl; wz /= wl; }
+  if (wl > 1) { wx /= wl; wz /= wl; }
   const shift = keys.ShiftLeft || keys.ShiftRight;
   const wasInWater = P.inWater;
   P.inWater = !P.fly && P.pos.y < WATER - 0.9;
@@ -2459,8 +2471,12 @@ function updatePlayer(dt) {
   }
   const eyeY = P.pos.y + EYE;
   P.camY = Math.abs(eyeY - P.camY) > 2 ? eyeY : P.camY + (eyeY - P.camY) * Math.min(1, dt * 20);
-  camera.position.set(P.pos.x, P.camY + (P.fly ? 0 : Math.sin(P.bob) * 0.045), P.pos.z);
-  camera.rotation.set(P.pitch, P.yaw, 0);
+  if (xrOn) { rig.position.copy(P.pos); rig.rotation.set(0, P.yaw, 0); }
+  else {
+    rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);
+    camera.position.set(P.pos.x, P.camY + (P.fly ? 0 : Math.sin(P.bob) * 0.045), P.pos.z);
+    camera.rotation.set(P.pitch, P.yaw, 0);
+  }
 }
 
 // ---------------------------------------------------------------- environment
@@ -2490,10 +2506,11 @@ function updateEnv(dt) {
   skyMat.uniforms.moonVis.value = smooth(-0.02, 0.08, moonDir.y) * (0.3 + 0.7 * night);
   stars.material.opacity = smooth(0.35, 0.9, night) * 0.9;
 
-  const under = camera.position.y < WATER - 0.05;
+  camera.getWorldPosition(camPos);
+  const under = camPos.y < WATER - 0.05;
   $('underwater').classList.toggle('hidden', !under);
   if (under) { scene.fog.color.set(0x2d6f8f); scene.fog.near = 1; scene.fog.far = 28; }
-  else { scene.fog.color.copy(_hor); scene.fog.near = 90; scene.fog.far = 185; }
+  else { scene.fog.color.copy(_hor); scene.fog.near = fogNear; scene.fog.far = fogFar; }
 
   const sunUp = sunDir.y > -0.02;
   const ldir = sunUp ? sunDir : moonDir.y > 0 ? moonDir : _b.set(0.3, 1, 0.2).normalize();
@@ -2506,8 +2523,8 @@ function updateEnv(dt) {
   hemi.groundColor.copy(SKY.groundNight).lerp(SKY.groundDay, day);
   hemi.intensity = 0.5 + day * 0.45;
 
-  sky.position.copy(camera.position);
-  stars.position.copy(camera.position);
+  sky.position.copy(camPos);
+  stars.position.copy(camPos);
   water.position.set(Math.round(P.pos.x / 10) * 10, WATER + Math.sin(envT * 0.8) * 0.03, Math.round(P.pos.z / 10) * 10);
 
   const flick = 0.85 + Math.sin(envT * 13) * 0.08 + Math.sin(envT * 7.3) * 0.07;
@@ -2915,7 +2932,7 @@ function animalSound(kind, a, loud = 1) {
   if (!V || !A.ctx || A.muted) return;
   const dx = a.x - P.pos.x, dz = a.z - P.pos.z, d = Math.hypot(dx, dz), vol = 0.14 * loud * (1 - d / (V.range || 30));
   if (vol < 0.01) return;
-  const pan = clamp((dx * Math.cos(P.yaw) - dz * Math.sin(P.yaw)) / Math.max(d, 1), -1, 1);
+  const vy = viewYaw(), pan = clamp((dx * Math.cos(vy) - dz * Math.sin(vy)) / Math.max(d, 1), -1, 1);
   const c = A.ctx, t0 = c.currentTime;
   for (let r = 0; r < (V.reps || 1); r++) {
     const t = t0 + r * (V.gap || 0);
@@ -3130,6 +3147,282 @@ function updateCritters(dt) {
   }
 }
 
+// ---------------------------------------------------------------- VR (WebXR: Quest browser, or PC + Link)
+// Left stick moves (where you look), right stick snap-turns, right trigger uses/places, right grip removes,
+// A jumps, B interacts, X/Y change hotbar slot, left stick click opens the floating menu, left grip toggles flying.
+let xrOn = false;
+const xrIn = { x: 0, y: 0 };
+const ctrls = {};
+const ctrlModels = new XRControllerModelFactory();
+const laser = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new V3(0, 0, 0), new V3(0, 0, -1)]), new THREE.LineBasicMaterial({ color: 0xfff2d0, transparent: true, opacity: 0.55 }));
+laser.frustumCulled = false;
+const reticle = new THREE.Mesh(new THREE.RingGeometry(0.03, 0.045, 24), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest: false, fog: false }));
+reticle.renderOrder = 30; reticle.visible = false;
+scene.add(reticle);
+for (let i = 0; i < 2; i++) {
+  const ray = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+  grip.add(ctrlModels.createControllerModel(grip));
+  rig.add(ray, grip);
+  ray.addEventListener('connected', e => {
+    const h = e.data.handedness;
+    ctrls[h] = { ray, grip, prev: [] };
+    if (h === 'right') { ray.add(laser); grip.add(vm); }
+    if (h === 'left') grip.add(wrist);
+  });
+  ray.addEventListener('disconnected', () => { for (const h in ctrls) if (ctrls[h].ray === ray) delete ctrls[h]; });
+}
+const _hq = new THREE.Quaternion(), _hd = new V3();
+function viewYaw() {
+  if (!xrOn) return P.yaw;
+  camera.getWorldQuaternion(_hq);
+  _hd.set(0, 0, -1).applyQuaternion(_hq);
+  return Math.atan2(-_hd.x, -_hd.z);
+}
+function aimRay() {
+  const r = ctrls.right?.ray;
+  if (xrOn && r) {
+    ray.ray.origin.setFromMatrixPosition(r.matrixWorld);
+    ray.ray.direction.set(0, 0, -1).transformDirection(r.matrixWorld);
+    ray.camera = camera;
+  } else ray.setFromCamera(CENTER, camera);
+}
+
+// wrist display on the left controller: time, held item, hints and messages
+const wristCanvas = document.createElement('canvas');
+wristCanvas.width = 512; wristCanvas.height = 300;
+const wristCtx = wristCanvas.getContext('2d'), wristTex = new THREE.CanvasTexture(wristCanvas);
+wristTex.colorSpace = THREE.SRGBColorSpace;
+const wrist = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.117), new THREE.MeshBasicMaterial({ map: wristTex, transparent: true, toneMapped: false, fog: false }));
+wrist.position.set(0, 0.07, 0.03); wrist.rotation.x = -0.9;
+let wristText = { hint: '', toast: '' }, wristKey = '', wristT = 0;
+function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function updateWrist(dt) {
+  if ((wristT -= dt) > 0) return;
+  wristT = 0.25;
+  const d = DEFS[curItem()];
+  const held = d.kind === 'empty' ? '✋ Empty hands' : `${d.icon} ${d.name}${d.pal && d.pal.length > 1 && d.kind !== 'tool' ? ' · ' + d.pal[curVar(d.id)][0] : ''}`;
+  const invLine = Object.keys(RES).filter(k => k === 'wood' || k === 'stone' || k === 'petals' || inv[k] > 0).map(k => `${RES[k][0]}${creative ? '∞' : inv[k]}`).join('  ');
+  const key = [held, wristText.hint, toastTimer > 0 ? wristText.toast : '', invLine, $('clockText').textContent].join('|');
+  if (key === wristKey) return;
+  wristKey = key;
+  const c = wristCtx;
+  c.clearRect(0, 0, 512, 300);
+  c.fillStyle = 'rgba(255,247,234,0.94)'; roundRect(c, 4, 4, 504, 292, 26); c.fill();
+  c.fillStyle = '#4a3b2f'; c.font = '800 30px Nunito, sans-serif';
+  c.fillText(`${$('clockIcon').textContent} ${$('clockText').textContent}   ${$('dayText').textContent}`, 22, 46);
+  c.font = '900 32px Nunito, sans-serif'; c.fillText(held, 22, 96);
+  c.font = '700 24px Nunito, sans-serif'; c.fillStyle = '#8a7766';
+  c.fillText(wristText.hint.slice(0, 40), 22, 140);
+  if (toastTimer > 0) { c.fillStyle = '#c0704f'; c.font = '800 25px Nunito, sans-serif'; c.fillText(wristText.toast.slice(0, 38), 22, 184); }
+  c.fillStyle = '#4a3b2f'; c.font = '700 22px Nunito, sans-serif';
+  c.fillText(invLine.slice(0, 46), 22, 236);
+  c.fillStyle = '#8a7766'; c.font = '700 18px Nunito, sans-serif';
+  c.fillText('X/Y slot · stick-click menu · B use · grip fly', 22, 276);
+  wristTex.needsUpdate = true;
+}
+
+// floating menu panel: catalog, backpack and crafting, pointed at with the right controller
+const UI = { open: false, mode: 'catalog', tab: 'Walls', page: 0, station: null, btns: [], hover: -1 };
+const uiCanvas = document.createElement('canvas');
+uiCanvas.width = 1024; uiCanvas.height = 720;
+const uiCtx = uiCanvas.getContext('2d'), uiTex = new THREE.CanvasTexture(uiCanvas);
+uiTex.colorSpace = THREE.SRGBColorSpace;
+const uiMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.773), new THREE.MeshBasicMaterial({ map: uiTex, transparent: true, toneMapped: false, fog: false }));
+uiMesh.visible = false; uiMesh.renderOrder = 25;
+scene.add(uiMesh);
+const imgCache = new Map();
+function thumbImg(d) {
+  const k = d.id + '|' + curVar(d.id);
+  let img = imgCache.get(k);
+  if (!img) { img = new Image(); img.onload = () => { if (UI.open) drawUI(); }; img.src = partThumb(d.id, curVar(d.id)); imgCache.set(k, img); }
+  return img.complete ? img : null;
+}
+function vrOpen(mode, station = null) {
+  UI.mode = mode; UI.station = station ?? UI.station; UI.page = 0; UI.open = true;
+  if (mode === 'catalog') { const cur = DEFS[curItem()]; if (cur && cur.cat !== 'Tools' && cur.kind !== 'empty') UI.tab = cur.cat; }
+  const head = camera.getWorldPosition(new V3()), yaw = viewYaw();
+  uiMesh.position.set(head.x - Math.sin(yaw) * 0.9, head.y - 0.12, head.z - Math.cos(yaw) * 0.9);
+  uiMesh.lookAt(head.x, head.y - 0.12, head.z);
+  uiMesh.visible = true;
+  drawUI(); sfx('ui');
+}
+function vrClose() { UI.open = false; uiMesh.visible = false; UI.hover = -1; }
+function drawUI() {
+  const c = uiCtx, B = UI.btns = [];
+  const btn = (x, y, w, h, label, fn, { on = false, dim = false, size = 22 } = {}) => {
+    const i = B.length; B.push({ x, y, w, h, fn: dim ? null : fn });
+    c.fillStyle = on ? '#e8916c' : i === UI.hover && !dim ? '#f6d9c4' : '#efe2cf'; roundRect(c, x, y, w, h, 14); c.fill();
+    c.fillStyle = on ? '#fff' : dim ? '#b8a898' : '#4a3b2f'; c.font = `900 ${size}px Nunito, sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(label, x + w / 2, y + h / 2 + 1); c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+  };
+  c.clearRect(0, 0, 1024, 720);
+  c.fillStyle = 'rgba(255,247,234,0.97)'; roundRect(c, 0, 0, 1024, 720, 34); c.fill();
+  btn(24, 20, 170, 50, '📖 Catalog', () => { UI.mode = 'catalog'; UI.page = 0; }, { on: UI.mode === 'catalog' });
+  btn(204, 20, 180, 50, '🎒 Backpack', () => { UI.mode = 'bag'; }, { on: UI.mode === 'bag' });
+  if (UI.station) btn(394, 20, 200, 50, UI.station === 'furnace' ? '🔥 Furnace' : '🔨 Workbench', () => { UI.mode = 'craft'; }, { on: UI.mode === 'craft' });
+  btn(880, 20, 120, 50, '✕ Close', vrClose);
+  if (UI.mode === 'catalog') {
+    let x = 24, y = 86;
+    for (const cat of CATS) {
+      c.font = '900 18px Nunito, sans-serif';
+      const w = c.measureText(cat).width + 30;
+      if (x + w > 1000) { x = 24; y += 44; }
+      btn(x, y, w, 36, cat, () => { UI.tab = cat; UI.page = 0; }, { on: cat === UI.tab, size: 18 });
+      x += w + 8;
+    }
+    const list = DEF_LIST.filter(d => d.cat === UI.tab), per = 12, pages = Math.max(1, Math.ceil(list.length / per));
+    UI.page = Math.min(UI.page, pages - 1);
+    list.slice(UI.page * per, UI.page * per + per).forEach((d, i) => {
+      const cx = 24 + (i % 4) * 246, cy = 190 + Math.floor(i / 4) * 150, locked = d.kind === 'tool' && !owned.has(d.id) && !creative;
+      const idx = B.length;
+      B.push({ x: cx, y: cy, w: 236, h: 140, fn: () => {
+        if (locked) { sfx('deny'); toast(`🔒 Make the ${d.name.toLowerCase()} at a workbench first`); return; }
+        if (d.kind === 'empty') curSlot = -1; else { if (curSlot < 0) curSlot = 0; slots[curSlot] = d.id; }
+        renderHotbar(); sfx('ui'); vrClose();
+      } });
+      c.fillStyle = curItem() === d.id ? '#f6d9c4' : idx === UI.hover ? '#fbeadc' : '#fffaf2'; roundRect(c, cx, cy, 236, 140, 16); c.fill();
+      c.globalAlpha = locked || (d.cost && !canAfford(d.cost)) ? 0.5 : 1;
+      const img = d.pal ? thumbImg(d) : null;
+      if (img) c.drawImage(img, cx + 8, cy + 10, 96, 96);
+      else { c.font = '56px sans-serif'; c.fillText(d.icon, cx + 22, cy + 80); }
+      c.fillStyle = '#4a3b2f'; c.font = '900 20px Nunito, sans-serif';
+      const words = d.name.split(' '); let line = '', ly = cy + 40;
+      for (const wd of words) { if (c.measureText(line + wd).width > 120) { c.fillText(line, cx + 110, ly); line = ''; ly += 24; } line += wd + ' '; }
+      c.fillText(line, cx + 110, ly);
+      c.fillStyle = '#8a7766'; c.font = '700 16px Nunito, sans-serif';
+      c.fillText(locked ? '🔒 workbench' : d.kind === 'creature' ? 'release' : d.cost ? (creative ? '✨ free' : costStr(d.cost)) : '', cx + 110, cy + 122);
+      c.globalAlpha = 1;
+    });
+    btn(24, 650, 150, 50, '◀ Prev', () => { UI.page = Math.max(0, UI.page - 1); }, { dim: UI.page === 0 });
+    btn(184, 650, 150, 50, 'Next ▶', () => { UI.page++; }, { dim: UI.page >= pages - 1 });
+    c.fillStyle = '#8a7766'; c.font = '800 20px Nunito, sans-serif'; c.fillText(`Page ${UI.page + 1}/${pages}`, 350, 682);
+    const cur = DEFS[curItem()];
+    if (cur.pal && cur.pal.length > 1 && cur.kind !== 'tool') btn(640, 650, 360, 50, `🎨 ${cur.name}: ${cur.pal[curVar(cur.id)][0]} ▶`, () => cycleColor(), { size: 19 });
+  } else if (UI.mode === 'bag') {
+    Object.entries(RES).forEach(([k, [icon, name]], i) => {
+      const cx = 24 + (i % 5) * 196, cy = 96 + Math.floor(i / 5) * 190;
+      c.fillStyle = '#fffaf2'; roundRect(c, cx, cy, 186, 178, 16); c.fill();
+      c.globalAlpha = creative || inv[k] ? 1 : 0.45;
+      c.font = '48px sans-serif'; c.textAlign = 'center'; c.fillText(icon, cx + 93, cy + 62);
+      c.fillStyle = '#4a3b2f'; c.font = '900 30px Nunito, sans-serif'; c.fillText(creative ? '∞' : String(inv[k] || 0), cx + 93, cy + 104);
+      c.font = '900 18px Nunito, sans-serif'; c.fillText(name, cx + 93, cy + 132);
+      c.fillStyle = '#8a7766'; c.font = '700 13px Nunito, sans-serif'; c.fillText((RES_HINT[k] || '').slice(0, 26), cx + 93, cy + 158);
+      c.textAlign = 'left'; c.globalAlpha = 1;
+    });
+  } else if (UI.mode === 'craft') {
+    craftStation = UI.station;
+    RECIPES[UI.station].forEach((r, i) => {
+      const cy = 90 + i * 100, [ok, ov] = Object.entries(r.out)[0], isTool = ok === 'tool', done = isTool && owned.has(ov);
+      c.fillStyle = '#fffaf2'; roundRect(c, 24, cy, 976, 90, 16); c.fill();
+      const img = isTool ? thumbImg(DEFS[ov]) : null;
+      if (img) c.drawImage(img, 34, cy + 5, 80, 80); else { c.font = '50px sans-serif'; c.fillText(isTool ? '🔨' : RES[ok][0], 44, cy + 64); }
+      c.fillStyle = '#4a3b2f'; c.font = '900 24px Nunito, sans-serif'; c.fillText(isTool ? DEFS[ov].name : `${ov} × ${RES[ok][1]}`, 130, cy + 38);
+      c.font = '700 18px Nunito, sans-serif'; c.fillStyle = hasAll(r.need) ? '#4a7a3a' : '#b4473a';
+      c.fillText(Object.entries(r.need).map(([k, v]) => `${v} ${RES[k][0]} ${RES[k][1]}`).join(' · '), 130, cy + 68);
+      btn(isTool ? 860 : 720, cy + 20, 130, 50, done ? 'Made' : isTool ? 'Craft' : 'Make 1', () => craft(r, 1), { dim: done || !hasAll(r.need) });
+      if (!isTool) btn(860, cy + 20, 130, 50, 'Make 5', () => craft(r, 5), { dim: !hasAll(r.need) });
+    });
+  }
+  uiTex.needsUpdate = true;
+}
+const _uiHits = [];
+function uiPointer() {
+  if (!UI.open || !ctrls.right) return null;
+  aimRay();
+  _uiHits.length = 0;
+  uiMesh.raycast(ray, _uiHits);
+  return _uiHits[0] || null;
+}
+
+// controller polling
+let turnLatch = false;
+function updateXRInput(dt) {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  for (const src of session.inputSources) if (ctrls[src.handedness]) ctrls[src.handedness].gp = src.gamepad;
+  const L = ctrls.left, R = ctrls.right;
+  const axis = (c, i) => { const a = c?.gp?.axes; if (!a) return 0; const v = a.length >= 4 ? a[i + 2] : a[i]; return Math.abs(v) < 0.15 ? 0 : v; };
+  const held = (c, i) => !!c?.gp?.buttons[i]?.pressed;
+  const press = (c, i) => { if (!c) return false; const p = held(c, i), was = c.prev[i]; c.prev[i] = p; return p && !was; };
+  xrIn.x = axis(L, 0); xrIn.y = axis(L, 1);
+  const rx = axis(R, 0), ry = axis(R, 1);
+  if (Math.abs(rx) > 0.7 && !turnLatch) { P.yaw -= Math.sign(rx) * Math.PI / 6; turnLatch = true; }
+  if (Math.abs(rx) < 0.3) turnLatch = false;
+  keys.ShiftLeft = held(L, 0);
+  keys.ShiftRight = P.fly && ry > 0.5;
+  keys.Space = held(R, 4) || (P.fly && ry < -0.5);
+  if (press(L, 1)) { P.fly = !P.fly; P.vel.y = 0; toast(P.fly ? '🕊️ Flying — right stick up/down' : '🚶 Walking'); }
+  if (press(L, 3)) UI.open ? vrClose() : vrOpen('catalog');
+  if (press(L, 4)) { curSlot = (curSlot + 1 + 10) % 11 - 1; onSlotChange(); }
+  if (press(L, 5)) { curSlot = (curSlot + 1 + 1) % 11 - 1; onSlotChange(); }
+  if (press(R, 3)) { rotIdx++; sfx('ui'); }
+  if (press(R, 5)) interact();
+  const uiHit = uiPointer();
+  if (UI.open) {
+    let hv = -1;
+    if (uiHit) {
+      const px = uiHit.uv.x * 1024, py = (1 - uiHit.uv.y) * 720;
+      hv = UI.btns.findIndex(b => b.fn && px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h);
+    }
+    if (hv !== UI.hover) { UI.hover = hv; drawUI(); }
+  }
+  const trig = press(R, 0);
+  if (uiHit) {
+    mouseL = false;
+    if (trig && UI.hover >= 0) { UI.btns[UI.hover].fn(); if (UI.open) drawUI(); }
+  } else {
+    if (trig) { mouseL = true; primary(); }
+    if (!held(R, 0)) mouseL = false;
+    if (press(R, 1)) secondary();
+  }
+  // laser length and reticle
+  if (ctrls.right) {
+    const hitPt = uiHit ? uiHit.point : target?.hit?.point;
+    const origin = new V3().setFromMatrixPosition(ctrls.right.ray.matrixWorld);
+    laser.scale.z = hitPt ? Math.max(0.05, origin.distanceTo(hitPt)) : 6;
+    reticle.visible = !!hitPt;
+    if (hitPt) {
+      reticle.position.copy(hitPt);
+      const n = uiHit ? new V3(0, 0, 1).applyQuaternion(uiMesh.quaternion) : target.hit.face ? target.hit.face.normal.clone().transformDirection(target.hit.object.matrixWorld) : UP;
+      reticle.lookAt(hitPt.clone().add(n));
+      reticle.position.addScaledVector(n, 0.01);
+    }
+  }
+  updateWrist(dt);
+}
+
+// lighter settings while in the headset so it stays smooth on a standalone Quest
+const DESKTOP_Q = { view: VIEW, grass: grassDensity, shadow: 2048, fog: [fogNear, fogFar] };
+function applyQuality(vr) {
+  VIEW = vr ? 3 : DESKTOP_Q.view;
+  grassDensity = vr ? 0.4 : DESKTOP_Q.grass;
+  [fogNear, fogFar] = vr ? [60, 135] : DESKTOP_Q.fog;
+  const size = vr ? 1024 : DESKTOP_Q.shadow;
+  if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.set(size, size); sun.shadow.map?.dispose(); sun.shadow.map = null; }
+  for (const ch of chunks.values()) ch.grassDirty = true;
+}
+async function enterVR() {
+  if (!navigator.xr) return;
+  initAudio();
+  try {
+    renderer.xr.setFramebufferScaleFactor(0.9);
+    const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] });
+    session.addEventListener('end', () => {
+      xrOn = false; vrClose(); applyQuality(false);
+      camera.add(vm); vm.position.set(0.34, -0.33, -0.58); reticle.visible = false;
+      for (const k in keys) keys[k] = false; mouseL = false;
+      showMenu();
+    });
+    await renderer.xr.setSession(session);
+    renderer.xr.setFoveation(1);
+    xrOn = true; applyQuality(true);
+    $('menu').classList.add('hidden');
+    P.pitch = 0;
+    toast('🥽 Welcome to the valley!');
+  } catch (e) { console.warn(e); toast('🥽 Couldn\'t start VR on this device'); }
+}
+if (navigator.xr) navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) { $('vrBtn').classList.remove('hidden'); $('vrBtn').onclick = enterVR; } }).catch(() => {});
+
 // ---------------------------------------------------------------- main update
 const useVerb = d => d.station ? (d.station === 'furnace' ? 'smelt' : 'craft') : { bed: 'sleep', campfire: 'warm up', table: 'have tea', fireplace: 'warm up', well: 'make a wish', mailbox: 'check the post', chair: 'sit', sofa: 'sit', armchair: 'sit', bench: 'sit' }[d.id];
 function animalHint(a) {
@@ -3251,10 +3544,9 @@ addEventListener('beforeunload', saveGame);
 
 let last = performance.now();
 function frame(now) {
-  requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  const running = active() || TEST;
+  const running = active() || TEST || xrOn;
   if (clockMode === 'real') hours = realHours();
   if (running) {
     if (clockMode === 'fast') hours += dt * 24 / DAY_SECONDS;
@@ -3265,6 +3557,7 @@ function frame(now) {
     updatePlayer(dt);
     updateChunks();
     updateInteraction(dt);
+    if (xrOn) updateXRInput(dt);
     updateViewModel(dt);
     for (let i = anims.length - 1; i >= 0; i--) if (anims[i](dt)) anims.splice(i, 1);
     updateAnimals(dt);
@@ -3274,7 +3567,7 @@ function frame(now) {
   if (((now / 1000) | 0) !== (((now - dt * 1000) / 1000) | 0)) updateClock();
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) $('toast').classList.remove('show'); }
   updateEnv(running ? dt : 0);
-  composer.render();
+  if (renderer.xr.isPresenting) renderer.render(scene, camera); else composer.render();
 }
 
 // ---------------------------------------------------------------- boot
@@ -3310,10 +3603,10 @@ function boot() {
   updatePlayer(0);
   $('play').disabled = false;
   $('play').textContent = save ? 'Continue' : 'Begin';
-  requestAnimationFrame(frame);
+  renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
