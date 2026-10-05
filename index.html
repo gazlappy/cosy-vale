@@ -140,7 +140,7 @@
 <div id="menu" class="overlay"><div class="card panel">
   <h1>🌿 Cosy Vale</h1>
   <p class="sub">Wander an endless valley, gather what you need, and build a little home.</p>
-  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
+  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="creativeBtn" class="ghost">🌿 Creative: off</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
   <div class="controls">
     <kbd>WASD</kbd><span>Walk</span><kbd>Mouse</kbd><span>Look around</span>
     <kbd>Shift</kbd><span>Run</span><kbd>Space</kbd><span>Jump / swim up</span>
@@ -1723,7 +1723,7 @@ function updateInv() {
 function toggleCreative() {
   creative = !creative;
   if (creative && !P.fly) { P.fly = true; P.vel.y = 0; }
-  updateInv(); renderHotbar(); sfx('pick'); dirty = true;
+  updateInv(); renderHotbar(); renderCreativeBtn(); sfx('pick'); dirty = true;
   toast(creative ? '✨ Creative mode — everything is free, one-hit gathering, flying on' : '🌿 Survival mode — back to gathering and costs');
 }
 function addInv(gain) {
@@ -1818,6 +1818,14 @@ function updateClock() {
   $('clockText').title = MOON_NAME;
 }
 function renderClockBtn() { $('clockBtn').textContent = clockMode === 'real' ? '🕰️ Clock: real time' : '⏩ Clock: fast days'; }
+function renderCreativeBtn() { $('creativeBtn').textContent = creative ? '✨ Creative: on' : '🌿 Creative: off'; }
+function toggleSnap() { snapOn = !snapOn; rotIdx = 0; renderHotbar(); sfx('ui'); toast(snapOn ? '🧲 Snapping on — parts lock to the grid and each other' : '✋ Free placement — put things anywhere'); }
+function toggleFly() { P.fly = !P.fly; P.vel.y = 0; toast(P.fly ? (xrOn ? '🕊️ Flying — right stick up/down' : '🕊️ Flying — Space up, Shift down') : '🚶 Walking'); }
+function toggleClock() {
+  clockMode = clockMode === 'real' ? 'fast' : 'real';
+  if (clockMode === 'real') hours = realHours();
+  renderClockBtn(); updateClock(); dirty = true;
+}
 
 // catalog
 let catalogOpen = false;
@@ -2053,11 +2061,8 @@ document.addEventListener('pointerlockchange', () => {
 function showMenu() { $('menu').classList.remove('hidden'); $('play').textContent = 'Resume'; resetNewWorldBtn(); saveGame(); }
 canvas.addEventListener('click', () => { if (!active() && !catalogOpen && !craftOpen && !bagOpen) lock(); });
 $('play').onclick = () => lock();
-$('clockBtn').onclick = () => {
-  clockMode = clockMode === 'real' ? 'fast' : 'real';
-  if (clockMode === 'real') hours = realHours();
-  renderClockBtn(); updateClock(); dirty = true;
-};
+$('clockBtn').onclick = toggleClock;
+$('creativeBtn').onclick = toggleCreative;
 let newWorldArmed = false;
 function resetNewWorldBtn() { newWorldArmed = false; $('newWorld').textContent = 'New world'; $('newWorld').classList.add('ghost'); }
 $('newWorld').onclick = () => {
@@ -2091,9 +2096,9 @@ addEventListener('keydown', e => {
   }
   switch (e.code) {
     case 'KeyR': rotIdx++; sfx('ui'); break;
-    case 'KeyG': snapOn = !snapOn; rotIdx = 0; renderHotbar(); sfx('ui'); toast(snapOn ? '🧲 Snapping on — parts lock to the grid and each other' : '✋ Free placement — put things anywhere'); break;
+    case 'KeyG': toggleSnap(); break;
     case 'KeyC': cycleColor(); break;
-    case 'KeyF': P.fly = !P.fly; P.vel.y = 0; toast(P.fly ? '🕊️ Flying — Space up, Shift down' : '🚶 Walking'); break;
+    case 'KeyF': toggleFly(); break;
     case 'KeyM': toggleMute(); break;
     case 'KeyE': interact(); break;
     case 'KeyI': openBag(); break;
@@ -3267,7 +3272,23 @@ function drawUI() {
   btn(24, 20, 170, 50, '📖 Catalog', () => { UI.mode = 'catalog'; UI.page = 0; }, { on: UI.mode === 'catalog' });
   btn(204, 20, 180, 50, '🎒 Backpack', () => { UI.mode = 'bag'; }, { on: UI.mode === 'bag' });
   if (UI.station) btn(394, 20, 200, 50, UI.station === 'furnace' ? '🔥 Furnace' : '🔨 Workbench', () => { UI.mode = 'craft'; }, { on: UI.mode === 'craft' });
+  btn(UI.station ? 604 : 394, 20, 170, 50, '⚙️ Settings', () => { UI.mode = 'settings'; }, { on: UI.mode === 'settings' });
   btn(880, 20, 120, 50, '✕ Close', vrClose);
+  if (UI.mode === 'settings') {
+    const opts = [
+      [creative ? '✨ Creative mode: ON' : '🌿 Creative mode: OFF', toggleCreative, creative],
+      [snapOn ? '🧲 Snap to parts: ON' : '✋ Snap to parts: OFF', toggleSnap, snapOn],
+      [P.fly ? '🕊️ Flying: ON' : '🚶 Flying: OFF', toggleFly, P.fly],
+      [A.muted ? '🔇 Sound: OFF' : '🔊 Sound: ON', toggleMute, !A.muted],
+      [clockMode === 'real' ? '🕰️ Clock: real time' : '⏩ Clock: fast days', toggleClock, clockMode === 'real'],
+      [`🥽 Graphics: ${['high', 'medium', 'low'][vrLevel]} ▶`, () => { vrLevel = (vrLevel + 1) % VR_LEVELS.length; slowT = 0; applyQuality(true); }, false],
+      ['🔄 Rotate held piece', () => { rotIdx++; sfx('ui'); }, false],
+      ['🎨 Change colour', () => cycleColor(), false],
+    ];
+    opts.forEach(([label, fn, on], i) => btn(24 + (i % 2) * 494, 100 + Math.floor(i / 2) * 110, 482, 90, label, fn, { on, size: 28 }));
+    btn(24, 560, 976, 80, '🚪 Leave VR', () => renderer.xr.getSession()?.end(), { size: 28 });
+    c.fillStyle = '#8a7766'; c.font = '700 18px Nunito, sans-serif'; c.fillText('Your world saves automatically. Point with the right controller and pull the trigger.', 24, 690);
+  }
   if (UI.mode === 'catalog') {
     let x = 24, y = 86;
     for (const cat of CATS) {
@@ -3358,7 +3379,7 @@ function updateXRInput(dt) {
   keys.ShiftLeft = held(L, 0);
   keys.ShiftRight = P.fly && ry > 0.5;
   keys.Space = held(R, 4) || (P.fly && ry < -0.5);
-  if (press(L, 1)) { P.fly = !P.fly; P.vel.y = 0; toast(P.fly ? '🕊️ Flying — right stick up/down' : '🚶 Walking'); }
+  if (press(L, 1)) toggleFly();
   if (press(L, 3)) UI.open ? vrClose() : vrOpen('catalog');
   if (press(L, 4)) { curSlot = (curSlot + 1 + 10) % 11 - 1; onSlotChange(); }
   if (press(L, 5)) { curSlot = (curSlot + 1 + 1) % 11 - 1; onSlotChange(); }
@@ -3620,7 +3641,7 @@ function boot() {
   }
   const pcx = Math.floor(P.pos.x / CHUNK), pcz = Math.floor(P.pos.z / CHUNK);
   for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) buildChunk(pcx + dx, pcz + dz);
-  updateInv(); renderHotbar(); renderClockBtn(); updateEnv(0); updateClock();
+  updateInv(); renderHotbar(); renderClockBtn(); renderCreativeBtn(); updateEnv(0); updateClock();
   updatePlayer(0);
   $('play').disabled = false;
   $('play').textContent = save ? 'Continue' : 'Begin';
