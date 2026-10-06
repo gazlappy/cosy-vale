@@ -183,6 +183,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 const $ = id => document.getElementById(id);
 const V3 = THREE.Vector3;
@@ -914,7 +915,7 @@ const grassClump = (() => {
       T.set(dx * 2 * lean * t, 1, dz * 2 * lean * t).normalize();
       N.crossVectors(S, T).normalize();
       if (N.y < 0) N.negate();
-      const f = (0.3 + 0.7 * Math.pow(t, 0.8)) * bright, k = dry * t * t;
+      const f = (0.48 + 0.52 * Math.pow(t, 0.8)) * bright, k = dry * t * t;
       const rgb = [f * (1 + 0.25 * k), f * (1 + 0.12 * k), f * (1 - 0.38 * k)];
       // a slight V-fold down the middle, so each blade catches the light on one side
       const verts = [[-1, 0, -0.6], [0, 0.35, 0], [1, 0, 0.6]];
@@ -2701,15 +2702,84 @@ Object.assign(DEF_LIST.find(d => d.id === 'bench'), { icon: '🏞️' });
 // ---------------------------------------------------------------- tools, crafting stations & metal parts
 // Tools are crafted at a workbench and held in the hotbar. Pickaxe tier decides which ores you can mine.
 const METAL = { stone: 0x9a968e, copper: 0xc87a44, iron: 0xb8bcc4, gold: 0xe8c04a };
-function toolGeo(kind, c) {
-  const W = 0x8a6040, p = [Cy(0.028, 0.034, 0.95, 6, 0, 0.47, 0, W), Cy(0.036, 0.036, 0.12, 6, 0, 0.08, 0, dk(W, 0.7))];
-  if (kind === 'pick') p.push(B(0.36, 0.07, 0.07, -0.16, 0.88, 0, c, 0, 0, -0.28), B(0.36, 0.07, 0.07, 0.16, 0.88, 0, c, 0, 0, 0.28), B(0.1, 0.1, 0.1, 0, 0.93, 0, dk(c, 0.8)));
-  if (kind === 'axe') p.push(B(0.05, 0.3, 0.24, 0, 0.84, 0.13, c), B(0.06, 0.12, 0.1, 0, 0.88, -0.05, dk(c, 0.8)));
-  if (kind === 'shovel') { p[0] = Cy(0.028, 0.034, 0.85, 6, 0, 0.62, 0, W); p.push(B(0.24, 0.3, 0.03, 0, 0.1, 0.02, c), B(0.16, 0.04, 0.04, 0, 1.06, 0, dk(W, 0.7))); }
+// a tube swept along a smooth curve, with its radius varying along the way (hafts, pick heads, grips)
+function sweep(pts, radius, col, seg = 12, flat = 1, n = 24) {
+  const curve = new THREE.CatmullRomCurve3(pts), fr = curve.computeFrenetFrames(n, false), pos = [], idx = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, p = curve.getPointAt(t), N = fr.normals[i], Bn = fr.binormals[i], rr = radius(t);
+    for (let j = 0; j <= seg; j++) {
+      const a = j / seg * Math.PI * 2, cx = Math.cos(a) * rr, sx = Math.sin(a) * rr * flat;
+      pos.push(p.x + N.x * cx + Bn.x * sx, p.y + N.y * cx + Bn.y * sx, p.z + N.z * cx + Bn.z * sx);
+    }
+  }
+  for (let i = 0; i < n; i++) for (let j = 0; j < seg; j++) { const a = i * (seg + 1) + j, b = a + seg + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+  return colGeo(g, col);
+}
+// brighten/darken a coloured part vertex by vertex (honed edges, worn metal)
+function tint(g, fn) {
+  const p = g.attributes.position, c = g.attributes.color;
+  for (let i = 0; i < p.count; i++) { const f = fn(p.getX(i), p.getY(i), p.getZ(i)); c.setXYZ(i, c.getX(i) * f, c.getY(i) * f, c.getZ(i) * f); }
+  return g;
+}
+function bladeExtrude(shape, depth, bevel = 0.007) {
+  const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 3, curveSegments: 14 });
+  g.translate(0, 0, -depth / 2);
+  return g;
+}
+const V = (x, y, z) => new V3(x, y, z);
+function lashing(y, z, r, col = 0x6b4a2e) {
+  const out = [];
+  for (let i = 0; i < 4; i++) { const t = new THREE.TorusGeometry(r, 0.0075, 6, 18); t.rotateX(Math.PI / 2); t.rotateZ((i - 1.5) * 0.35); t.translate(0, y + (i - 1.5) * 0.022, z); out.push(colGeo(t, i % 2 ? dk(new THREE.Color(col), 0.85) : col)); }
+  return out;
+}
+function toolGeo(kind, c, mat = 'iron') {
+  const W = 0x8a6040, stone = mat === 'stone', p = [];
+  if (kind !== 'shovel') {
+    // ash haft with a slight curve, a swelled knob at the end and a leather-wrapped grip
+    p.push(sweep([V(0, -0.02, 0), V(0, 0.3, 0.012), V(0, 0.65, 0.01), V(0, 0.98, -0.004)], t => 0.029 - t * 0.006 + Math.max(0, 0.06 - t) * 0.3, W, 14));
+    for (let y = 0.06; y < 0.32; y += 0.024) { const t = new THREE.TorusGeometry(0.031, 0.006, 6, 16); t.rotateX(Math.PI / 2); t.rotateZ(0.12); t.translate(0, y, 0.004 + y * 0.03); p.push(colGeo(t, 0x5a3a24)); }
+  }
+  if (kind === 'axe') {
+    if (stone) {
+      // knapped flint wedge lashed into the haft
+      const g = new THREE.IcosahedronGeometry(0.1, 1), q = g.attributes.position;
+      for (let i = 0; i < q.count; i++) { const x = q.getX(i), y = q.getY(i), z = q.getZ(i); const zz = z * 1.55 + (z > 0 ? 0.02 : 0); q.setXYZ(i, x * 0.34 * (1 - Math.max(0, zz) * 2.6), y * 0.58 * (1 + Math.max(0, zz) * 1.4), zz); }
+      g.computeVertexNormals(); g.translate(0, 0.86, 0.085);
+      p.push(tint(colGeo(g, c, 0.25), (x, y, z) => z > 0.15 ? 1.18 : 1), ...lashing(0.86, 0.0, 0.042));
+    } else {
+      const sh = new THREE.Shape();
+      sh.moveTo(-0.075, -0.048); sh.lineTo(-0.075, 0.048); sh.lineTo(0.035, 0.044);
+      sh.quadraticCurveTo(0.12, 0.06, 0.2, 0.155); sh.quadraticCurveTo(0.255, 0.0, 0.2, -0.165); sh.quadraticCurveTo(0.11, -0.075, 0.035, -0.044); sh.closePath();
+      const g = bladeExtrude(sh, 0.04); g.rotateY(-Math.PI / 2); g.translate(0, 0.86, 0);
+      p.push(tint(colGeo(g, c), (x, y, z) => z > 0.17 ? 1.35 : 1 - Math.max(0, -z - 0.03) * 2.2));
+      p.push(RB(0.058, 0.11, 0.085, 0, 0.86, -0.02, dk(c, 0.75)));
+    }
+  }
+  if (kind === 'pick') {
+    const head = sweep([V(-0.31, 0.8, 0), V(-0.16, 0.885, 0), V(0, 0.905, 0), V(0.16, 0.885, 0), V(0.31, 0.8, 0)], t => 0.004 + 0.03 * Math.pow(Math.sin(Math.PI * t), 0.55), c, 12, stone ? 1.3 : 1.15);
+    p.push(tint(head, x => Math.abs(x) > 0.24 ? 1.3 : 1), stone ? RB(0.075, 0.075, 0.075, 0, 0.9, 0, dk(c, 0.85)) : RB(0.07, 0.095, 0.078, 0, 0.9, 0, dk(c, 0.75)));
+    if (stone) p.push(...lashing(0.9, 0, 0.04));
+  }
+  if (kind === 'shovel') {
+    p.push(sweep([V(0, 0.27, 0), V(0, 0.6, 0.006), V(0, 0.98, 0)], t => 0.026 - t * 0.003, W, 14));
+    // D-grip
+    const d = new THREE.TorusGeometry(0.075, 0.016, 8, 22, Math.PI); d.translate(0, 1.035, 0); p.push(colGeo(d, W));
+    p.push(sweep([V(0, 0.97, 0), V(-0.05, 1.0, 0), V(-0.075, 1.035, 0)], () => 0.017, W, 10), sweep([V(0, 0.97, 0), V(0.05, 1.0, 0), V(0.075, 1.035, 0)], () => 0.017, W, 10));
+    // steel socket and a dished blade with a foot-tread along the top
+    p.push(CyS(0.03, 0.044, 0.12, 8, 0, 0.29, 0.004, dk(c, 0.8)));
+    const sh = new THREE.Shape();
+    sh.moveTo(-0.13, 0.245); sh.lineTo(0.13, 0.245); sh.quadraticCurveTo(0.145, 0.04, 0, -0.07); sh.quadraticCurveTo(-0.145, 0.04, -0.13, 0.245);
+    const g = bladeExtrude(sh, 0.01, 0.004), q = g.attributes.position;
+    for (let i = 0; i < q.count; i++) q.setZ(i, q.getZ(i) + q.getX(i) * q.getX(i) * 1.6 + 0.02);
+    g.computeVertexNormals();
+    p.push(tint(colGeo(g, c), (x, y) => y < -0.02 ? 1.3 : 1), RB(0.27, 0.016, 0.03, 0, 0.248, 0.03, dk(c, 0.85)));
+  }
   return { parts: p };
 }
-const TOOL = (id, name, short, icon, kind, metal, stats) => ({ id, kind: 'tool', name, short, icon, cat: 'Tools', pal: [[metal[0].toUpperCase() + metal.slice(1), METAL[metal]]], build: c => toolGeo(kind, c), family: kind, ...stats });
-Object.assign(DEF_LIST.find(d => d.id === 'hand'), { kind: 'tool', family: 'axe', tier: 0, mine: 1, chop: 1, pal: [['Stone', METAL.stone]], build: c => toolGeo('axe', c), name: 'Stone Axe', short: 'Axe' });
+const TOOL = (id, name, short, icon, kind, metal, stats) => ({ id, kind: 'tool', name, short, icon, cat: 'Tools', pal: [[metal[0].toUpperCase() + metal.slice(1), METAL[metal]]], build: c => toolGeo(kind, c, metal), family: kind, ...stats, surf: metal === 'stone' ? SURF.stone : SURF.metal });
+Object.assign(DEF_LIST.find(d => d.id === 'hand'), { kind: 'tool', family: 'axe', tier: 0, mine: 1, chop: 1, pal: [['Stone', METAL.stone]], build: c => toolGeo('axe', c, 'stone'), surf: SURF.stone, name: 'Stone Axe', short: 'Axe' });
 DEF_LIST.push(
   TOOL('pick_stone', 'Stone Pickaxe', 'Stone pick', '⛏️', 'pick', 'stone', { tier: 1, mine: 2, chop: 1 }),
   TOOL('pick_copper', 'Copper Pickaxe', 'Copper pick', '⛏️', 'pick', 'copper', { tier: 2, mine: 3, chop: 1 }),
@@ -3462,7 +3532,7 @@ DEF_LIST.push(
 // ---- which material each palette represents (for surfaces)
 const PAL_SURF = new Map([[WOOD, SURF.wood], [STONE, SURF.stone], [BRICK, SURF.brick], [PLASTER, SURF.plaster], [ROOF, SURF.roof], [FABRIC, SURF.fabric], [TILE, SURF.tile], [HEDGE, SURF.leaf], [PAINT, SURF.paint], [CROPS, SURF.leaf], [METALS, SURF.metal]]);
 for (const id of ['ironfence', 'lamppost', 'anvil', 'brazier', 'beacon', 'weathervane', 'copperroof', 'goldstatue']) { const d = DEF_LIST.find(x => x.id === id); if (d) d.surf = SURF.metal; }
-for (const d of DEF_LIST) if (d.kind === 'tool') d.surf = SURF.metal;
+for (const d of DEF_LIST) if (d.kind === 'tool') d.surf ??= SURF.metal;
 addMats(WOOD, SURF.wood, ' wood'); addMats(STONE, SURF.stone, ' stone'); addMats(BRICK, SURF.brick, ' brick'); addMats(PLASTER, SURF.plaster, ' plaster'); addMats(ROOF, SURF.roof, ' tiles');
 addMats(METALS, SURF.metal); addMats(FABRIC, SURF.fabric, ' fabric'); addMats(TILE, SURF.tile, ' glaze'); addMats(HEDGE, SURF.leaf, ' leaves'); addMats(PAINT, SURF.paint, ' paint');
 DEF_LIST.push(
@@ -4712,12 +4782,33 @@ function updateEnv(dt) {
 const animalsGroup = new THREE.Group();
 scene.add(animalsGroup);
 const animals = [];
-function Sp(r, sx, sy, sz, x, y, z, col, seg = 7) {
-  const g = new THREE.SphereGeometry(r, seg, Math.max(4, seg - 2));
-  g.scale(sx, sy, sz); g.translate(x, y, z);
-  return colGeo(g, col, 0.08);
+// smooth stand-ins for the box and faceted primitives, so creatures and people read as soft and rounded
+function RB(w, h, d, x, y, z, col, rx = 0, ry = 0, rz = 0) {
+  const g = new RoundedBoxGeometry(w, h, d, 4, Math.min(w, h, d) * 0.49);
+  if (rx) g.rotateX(rx); if (ry) g.rotateY(ry); if (rz) g.rotateZ(rz);
+  g.translate(x, y, z); return colGeo(g, col);
 }
-function legGeo(w, h, col) { const g = new THREE.BoxGeometry(w, h, w); g.translate(0, -h / 2, 0); return colGeo(g, col); }
+function IcS(r, x, y, z, col) { const g = new THREE.SphereGeometry(r, 14, 10); g.translate(x, y, z); return colGeo(g, col); }
+function CoS(r, h, seg, x, y, z, col) { const g = new THREE.ConeGeometry(r, h, Math.max(14, seg * 3), 3); g.translate(x, y, z); return colGeo(g, col); }
+function CyS(rt, rb, h, seg, x, y, z, col) { const g = new THREE.CylinderGeometry(rt, rb, h, Math.max(16, seg * 2)); g.translate(x, y, z); return colGeo(g, col); }
+function limbS(r0, r1, a, b, seg = 6) { return limb(r0, r1, a, b, Math.max(14, seg * 2)); }
+// soft fur / fabric: fine fibres in the creature's own space, lit with a gentle bump
+const FUR_FRAG = `{
+  float fine = 1.0 - clamp(length(fwidth(vOP)) * 12.0, 0.0, 1.0);
+  float f1 = tri(vOP, vON, 26.0), f2 = tri(vOP * vec3(1.0, 3.0, 1.0), vON, 10.0);
+  normal = bumpN(normal, (f1 * 0.7 + f2 * 0.3) * fine, 0.01);
+  diffuseColor.rgb *= 0.98 + (f2 - 0.47) * 0.03 + (f1 - 0.47) * 0.05 * fine;
+}`;
+const creatureMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0 });
+creatureMat.onBeforeCompile = sh => natureShader(sh, FUR_FRAG);
+creatureMat.customProgramCacheKey = () => 'fur1';
+function Sp(r, sx, sy, sz, x, y, z, col, seg = 16) {
+  seg = Math.max(12, seg * 2);
+  const g = new THREE.SphereGeometry(r, seg, Math.round(seg * 0.7));
+  g.scale(sx, sy, sz); g.translate(x, y, z);
+  return colGeo(g, col);
+}
+function legGeo(w, h, col) { const r = w * 0.55, g = new THREE.CapsuleGeometry(r, Math.max(0.01, h - r * 2), 5, 12); g.translate(0, -h / 2, 0); return colGeo(g, col); }
 const EYE_C = 0x1e1a18, GOLD_EYE = 0xffd84a;
 const SKINS = [0xf2d0b0, 0xe0b090, 0xc08a60, 0x8a5a3a, 0xf6dcc4, 0x6a4430];
 const HAIRS = [0x4a3020, 0x2a1e18, 0xc89a50, 0x8a3a1e, 0x1e1a18, 0xd8b878];
@@ -4731,30 +4822,54 @@ function dragonWing(c) {
   const s = new THREE.Shape();
   [[0, 0.6], [1.4, 1.0], [3.2, 0.6], [2.6, -0.6], [1.6, -1.2], [0.6, -0.9], [0, -0.7]].forEach(([x, z], i) => i ? s.lineTo(x, z) : s.moveTo(x, z));
   const g = new THREE.ShapeGeometry(s); g.rotateX(Math.PI / 2);
-  return mergeGeometries([colGeo(g, c), colGeo(limb(0.07, 0.04, new V3(0, 0, 0.5), new V3(1.4, 0, 1.0), 5), dk(c, 0.6)), colGeo(limb(0.04, 0.02, new V3(1.4, 0, 1.0), new V3(3.2, 0, 0.6), 5), dk(c, 0.6))]);
+  return mergeGeometries([colGeo(g, c), colGeo(limbS(0.07, 0.04, new V3(0, 0, 0.5), new V3(1.4, 0, 1.0), 5), dk(c, 0.6)), colGeo(limbS(0.04, 0.02, new V3(1.4, 0, 1.0), new V3(3.2, 0, 0.6), 5), dk(c, 0.6))]);
 }
 function humanoid(o) {
-  const sk = o.skin, sh = o.shirt, pa = o.pants, hr = o.hair, shoe = 0x3a2a22;
-  const body = [B(0.46, 0.62, 0.26, 0, 1.24, 0, sh), B(0.47, 0.07, 0.27, 0, 0.96, 0, dk(pa, 0.8))];
-  const head = [B(0.32, 0.34, 0.3, 0, 1.76, 0, sk), B(0.1, 0.12, 0.1, 0, 1.58, 0, sk), Ic(0.025, -0.07, 1.78, 0.152, EYE_C, 0), Ic(0.025, 0.07, 1.78, 0.152, EYE_C, 0),
-    B(0.06, 0.03, 0.02, -0.1, 1.7, 0.15, 0xe8a0a0), B(0.06, 0.03, 0.02, 0.1, 1.7, 0.15, 0xe8a0a0)];
-  if (o.hat !== 'gnome') head.push(B(0.34, 0.12, 0.33, 0, 1.92, -0.01, hr), B(0.34, 0.26, 0.08, 0, 1.8, -0.14, hr));
-  if (o.apron) body.push(B(0.36, 0.55, 0.02, 0, 1.08, 0.14, 0xf6f2ea));
-  if (o.overalls) body.push(B(0.3, 0.32, 0.02, 0, 1.3, 0.135, pa), B(0.05, 0.3, 0.02, -0.12, 1.42, 0.136, pa), B(0.05, 0.3, 0.02, 0.12, 1.42, 0.136, pa));
-  if (o.glasses) head.push(B(0.26, 0.02, 0.02, 0, 1.79, 0.16, 0x3a3a3a), B(0.08, 0.07, 0.01, -0.07, 1.78, 0.16, 0xcfe0ea), B(0.08, 0.07, 0.01, 0.07, 1.78, 0.16, 0xcfe0ea));
-  if (o.hat === 'straw') head.push(Cy(0.32, 0.32, 0.03, 14, 0, 1.94, 0, 0xe2c870), Cy(0.17, 0.19, 0.16, 12, 0, 2.02, 0, 0xe2c870), Cy(0.195, 0.195, 0.04, 12, 0, 1.97, 0, 0xc8403a));
-  if (o.hat === 'chef') head.push(Cy(0.17, 0.16, 0.12, 12, 0, 1.97, 0, 0xffffff), Ic(0.2, 0, 2.13, 0, 0xffffff, 0.05));
-  if (o.hat === 'gnome') { const h = new THREE.ConeGeometry(0.2, 0.62, 10); h.rotateX(-0.25); h.translate(0, 2.18, -0.06); head.push(colGeo(h, o.hatCol)); }
-  if (o.beard) head.push(Ic(0.17, 0, 1.6, 0.1, 0xf4f2ec, 0.1), Ic(0.12, 0, 1.47, 0.12, 0xf4f2ec, 0.1), B(0.3, 0.06, 0.1, 0, 1.92, 0.08, 0xf4f2ec));
-  const leg = mergeGeometries([legGeo(0.16, 0.82, pa), B(0.17, 0.1, 0.24, 0, -0.85, 0.03, shoe)]);
-  const arm = mergeGeometries([legGeo(0.12, 0.56, o.sleeve ?? sh), B(0.11, 0.12, 0.11, 0, -0.62, 0, sk)]);
-  return { body, head, pivot: [0, 1.56, 0], leg, legs: [[-0.11, 0.9, 0], [0.11, 0.9, 0]], arm, arms: [[-0.3, 1.52, 0], [0.3, 1.52, 0]] };
+  const sk = o.skin, sh = o.shirt, pa = o.pants, hr = o.hair, shoe = 0x3a2a22, slv = o.sleeve ?? sh;
+  const lathe = (pts, col, sz) => { const g = new THREE.LatheGeometry(pts.map(([rr, y]) => new THREE.Vector2(rr, y)), 20); g.scale(1, 1, sz); return colGeo(g, col); };
+  const ball = (rr, sx, sy, sz, x, y, z, col, seg = 16) => { const g = new THREE.SphereGeometry(rr, seg, Math.round(seg * 0.7)); g.scale(sx, sy, sz); g.translate(x, y, z); return colGeo(g, col); };
+  const belt = new THREE.TorusGeometry(0.19, 0.016, 6, 26); belt.rotateX(Math.PI / 2); belt.scale(1, 1, 0.68); belt.translate(0, 0.975, 0);
+  const body = [
+    lathe([[0, 0.9], [0.17, 0.91], [0.2, 0.98], [0.186, 1.08], [0.19, 1.22], [0.214, 1.37], [0.222, 1.46], [0.185, 1.53], [0.09, 1.565], [0, 1.57]], sh, 0.64),
+    lathe([[0, 0.84], [0.18, 0.85], [0.205, 0.93], [0.19, 1.0], [0, 1.0]], pa, 0.7),
+    colGeo(belt, dk(pa, 0.6)),
+  ];
+  const head = [
+    CyS(0.055, 0.062, 0.14, 8, 0, 1.6, 0, sk),
+    ball(0.15, 0.95, 1.08, 1, 0, 1.78, 0, sk, 22), ball(0.12, 1, 0.8, 1, 0, 1.7, 0.03, sk),
+    ball(0.024, 0.85, 1.1, 1.25, 0, 1.765, 0.15, dk(sk, 0.94), 10),
+    ball(0.032, 0.45, 1, 0.8, -0.145, 1.775, 0, dk(sk, 0.95), 10), ball(0.032, 0.45, 1, 0.8, 0.145, 1.775, 0, dk(sk, 0.95), 10),
+    ...[-1, 1].flatMap(s2 => [
+      ball(0.023, 1, 0.9, 0.55, s2 * 0.055, 1.795, 0.133, 0xf6f2ec, 12), ball(0.0135, 1, 1, 0.5, s2 * 0.055, 1.795, 0.1465, EYE_C, 10),
+      RB(0.052, 0.013, 0.02, s2 * 0.056, 1.836, 0.142, dk(new THREE.Color(hr), 0.8), 0, 0, -s2 * 0.12),
+      ball(0.026, 1, 0.7, 0.35, s2 * 0.088, 1.74, 0.118, 0xe8a0a0, 10)]),
+    RB(0.055, 0.013, 0.014, 0, 1.712, 0.149, 0xb06060),
+  ];
+  if (o.hat !== 'gnome') {
+    const cap = new THREE.SphereGeometry(0.158, 22, 12, 0, Math.PI * 2, 0, Math.PI * 0.5); cap.scale(0.98, 1.1, 1.04); cap.translate(0, 1.79, -0.012);
+    head.push(colGeo(cap, hr), ball(0.15, 0.97, 0.88, 0.72, 0, 1.75, -0.06, hr, 18));
+  }
+  if (o.apron) body.push(RB(0.32, 0.5, 0.016, 0, 1.1, 0.13, 0xf6f2ea), RB(0.02, 0.16, 0.01, -0.12, 1.42, 0.13, 0xf6f2ea), RB(0.02, 0.16, 0.01, 0.12, 1.42, 0.13, 0xf6f2ea));
+  if (o.overalls) body.push(RB(0.26, 0.28, 0.016, 0, 1.28, 0.135, pa), RB(0.045, 0.3, 0.016, -0.11, 1.4, 0.135, pa), RB(0.045, 0.3, 0.016, 0.11, 1.4, 0.135, pa));
+  if (o.glasses) {
+    for (const s2 of [-1, 1]) { const t = new THREE.TorusGeometry(0.036, 0.005, 6, 20); t.translate(s2 * 0.056, 1.795, 0.15); head.push(colGeo(t, 0x3a3a3a)); }
+    head.push(RB(0.04, 0.006, 0.006, 0, 1.8, 0.152, 0x3a3a3a));
+  }
+  if (o.hat === 'straw') head.push(CyS(0.32, 0.32, 0.025, 14, 0, 1.93, 0, 0xe2c870), CyS(0.15, 0.175, 0.17, 12, 0, 2.0, 0, 0xe2c870), CyS(0.178, 0.178, 0.04, 12, 0, 1.95, 0, 0xc8403a));
+  if (o.hat === 'chef') head.push(CyS(0.16, 0.155, 0.13, 12, 0, 1.96, 0, 0xffffff), ball(0.2, 1, 0.75, 1, 0, 2.1, 0, 0xffffff, 18));
+  if (o.hat === 'gnome') { const h = new THREE.ConeGeometry(0.19, 0.62, 18, 3); h.rotateX(-0.25); h.translate(0, 2.13, -0.06); head.push(colGeo(h, o.hatCol), ball(0.15, 0.97, 0.55, 0.72, 0, 1.79, -0.04, hr, 18)); }
+  if (o.beard) head.push(ball(0.15, 1, 1, 0.8, 0, 1.62, 0.08, 0xf4f2ec, 16), ball(0.1, 1, 1.2, 0.8, 0, 1.5, 0.1, 0xf4f2ec, 14), ball(0.06, 1.6, 0.6, 0.8, 0, 1.72, 0.13, 0xf4f2ec, 12));
+  const legG = new THREE.CapsuleGeometry(0.072, 0.68, 6, 14); legG.translate(0, -0.42, 0);
+  const leg = mergeGeometries([colGeo(legG, pa), RB(0.13, 0.09, 0.25, 0, -0.85, 0.045, shoe)]);
+  const armG = new THREE.CapsuleGeometry(0.052, 0.46, 6, 12); armG.translate(0, -0.27, 0);
+  const arm = mergeGeometries([colGeo(armG, slv), ball(0.05, 1, 1.25, 0.8, 0, -0.56, 0.01, sk, 12)]);
+  return { body, head, pivot: [0, 1.56, 0], leg, legs: [[-0.1, 0.9, 0], [0.1, 0.9, 0]], arm, arms: [[-0.255, 1.5, 0], [0.255, 1.5, 0]] };
 }
 function horseModel(c, mane, horn) {
-  const head = [B(0.26, 0.72, 0.3, 0, 1.78, 0.72, c, 0.55), B(0.26, 0.3, 0.56, 0, 2.12, 1.02, c), B(0.22, 0.2, 0.2, 0, 2.02, 1.28, dk(c, 0.85)), B(0.08, 0.66, 0.12, 0, 1.86, 0.6, mane, 0.55),
-    B(0.07, 0.14, 0.06, -0.09, 2.32, 0.82, c), B(0.07, 0.14, 0.06, 0.09, 2.32, 0.82, c), Ic(0.025, -0.13, 2.18, 1.1, EYE_C, 0), Ic(0.025, 0.13, 2.18, 1.1, EYE_C, 0)];
+  const head = [RB(0.26, 0.72, 0.3, 0, 1.78, 0.72, c, 0.55), RB(0.26, 0.3, 0.56, 0, 2.12, 1.02, c), RB(0.22, 0.2, 0.2, 0, 2.02, 1.28, dk(c, 0.85)), RB(0.08, 0.66, 0.12, 0, 1.86, 0.6, mane, 0.55),
+    RB(0.07, 0.14, 0.06, -0.09, 2.32, 0.82, c), RB(0.07, 0.14, 0.06, 0.09, 2.32, 0.82, c), IcS(0.025, -0.13, 2.18, 1.1, EYE_C, 0), IcS(0.025, 0.13, 2.18, 1.1, EYE_C, 0)];
   if (horn) { const h = new THREE.ConeGeometry(0.05, 0.42, 6); h.rotateX(0.5); h.translate(0, 2.42, 1.0); head.push(colGeo(h, 0xf2d26a)); }
-  return { body: [B(0.5, 0.56, 1.3, 0, 1.32, 0, c), B(0.12, 0.7, 0.12, 0, 1.05, -0.72, mane, 0.35)], head, pivot: [0, 1.45, 0.55],
+  return { body: [RB(0.5, 0.56, 1.3, 0, 1.32, 0, c), RB(0.12, 0.7, 0.12, 0, 1.05, -0.72, mane, 0.35)], head, pivot: [0, 1.45, 0.55],
     leg: legGeo(0.12, 1.04, dk(c, 0.85)), legs: [[-0.16, 1.04, 0.48], [0.16, 1.04, 0.48], [-0.16, 1.04, -0.48], [0.16, 1.04, -0.48]], stride: 0.8 };
 }
 const quadLegs = (x, y, z) => [[-x, y, z], [x, y, z], [-x, y, -z], [x, y, -z]];
@@ -4763,19 +4878,19 @@ const MODELS = {
     const c = [0x9c8468, 0x8d8882, 0xeee8de][v], pink = 0xe8a5a5;
     return {
       body: [Sp(0.17, 1, 0.85, 1.35, 0, 0.19, -0.02, c), Sp(0.065, 1, 1, 1, 0, 0.25, -0.25, 0xffffff), Sp(0.06, 1.2, 0.6, 1.8, 0.09, 0.05, 0.04, c), Sp(0.06, 1.2, 0.6, 1.8, -0.09, 0.05, 0.04, c)],
-      head: [Sp(0.1, 1, 0.95, 1.15, 0, 0.33, 0.19, c), B(0.045, 0.2, 0.025, -0.045, 0.48, 0.15, c, -0.25, 0, 0.12), B(0.045, 0.2, 0.025, 0.045, 0.48, 0.15, c, -0.25, 0, -0.12),
-        B(0.025, 0.14, 0.01, -0.045, 0.48, 0.165, pink, -0.25, 0, 0.12), B(0.025, 0.14, 0.01, 0.045, 0.48, 0.165, pink, -0.25, 0, -0.12),
+      head: [Sp(0.1, 1, 0.95, 1.15, 0, 0.33, 0.19, c), RB(0.045, 0.2, 0.025, -0.045, 0.48, 0.15, c, -0.25, 0, 0.12), RB(0.045, 0.2, 0.025, 0.045, 0.48, 0.15, c, -0.25, 0, -0.12),
+        RB(0.025, 0.14, 0.01, -0.045, 0.48, 0.165, pink, -0.25, 0, 0.12), RB(0.025, 0.14, 0.01, 0.045, 0.48, 0.165, pink, -0.25, 0, -0.12),
         Sp(0.018, 1, 1, 1, -0.065, 0.36, 0.25, EYE_C, 5), Sp(0.018, 1, 1, 1, 0.065, 0.36, 0.25, EYE_C, 5), Sp(0.015, 1, 1, 1, 0, 0.32, 0.3, pink, 5)],
       pivot: [0, 0.27, 0.12],
     };
   },
   deer: v => {
     const c = 0xa8744a, belly = 0xe6d3b8, dark = 0x4a3426, parts = [];
-    if (v === 1) for (const s of [-1, 1]) parts.push(B(0.035, 0.38, 0.035, s * 0.08, 1.99, 0.64, 0xd8c8a8, 0, 0, s * 0.35), B(0.03, 0.22, 0.03, s * 0.18, 2.12, 0.7, 0xd8c8a8, -0.4, 0, s * 0.7), B(0.03, 0.18, 0.03, s * 0.12, 2.15, 0.6, 0xd8c8a8, 0.5, 0, s * 0.2));
+    if (v === 1) for (const s of [-1, 1]) parts.push(RB(0.035, 0.38, 0.035, s * 0.08, 1.99, 0.64, 0xd8c8a8, 0, 0, s * 0.35), RB(0.03, 0.22, 0.03, s * 0.18, 2.12, 0.7, 0xd8c8a8, -0.4, 0, s * 0.7), RB(0.03, 0.18, 0.03, s * 0.12, 2.15, 0.6, 0xd8c8a8, 0.5, 0, s * 0.2));
     return {
-      body: [B(0.42, 0.46, 1.05, 0, 1.0, 0, c), B(0.36, 0.1, 0.8, 0, 0.78, 0, belly), B(0.12, 0.2, 0.06, 0, 1.1, -0.54, 0xf3ece0), B(0.3, 0.3, 0.06, 0, 0.98, -0.5, belly)],
-      head: [B(0.18, 0.6, 0.2, 0, 1.42, 0.55, c, 0.45), B(0.2, 0.22, 0.4, 0, 1.72, 0.74, c), B(0.12, 0.12, 0.14, 0, 1.68, 0.97, dark),
-        B(0.06, 0.16, 0.04, -0.13, 1.86, 0.62, c, 0, 0, 0.6), B(0.06, 0.16, 0.04, 0.13, 1.86, 0.62, c, 0, 0, -0.6),
+      body: [RB(0.42, 0.46, 1.05, 0, 1.0, 0, c), RB(0.36, 0.1, 0.8, 0, 0.78, 0, belly), RB(0.12, 0.2, 0.06, 0, 1.1, -0.54, 0xf3ece0), RB(0.3, 0.3, 0.06, 0, 0.98, -0.5, belly)],
+      head: [RB(0.18, 0.6, 0.2, 0, 1.42, 0.55, c, 0.45), RB(0.2, 0.22, 0.4, 0, 1.72, 0.74, c), RB(0.12, 0.12, 0.14, 0, 1.68, 0.97, dark),
+        RB(0.06, 0.16, 0.04, -0.13, 1.86, 0.62, c, 0, 0, 0.6), RB(0.06, 0.16, 0.04, 0.13, 1.86, 0.62, c, 0, 0, -0.6),
         Sp(0.025, 1, 1, 1, -0.1, 1.76, 0.82, EYE_C, 5), Sp(0.025, 1, 1, 1, 0.1, 1.76, 0.82, EYE_C, 5), ...parts],
       pivot: [0, 1.15, 0.42], leg: legGeo(0.08, 0.8, dark), legs: quadLegs(0.14, 0.8, 0.4),
     };
@@ -4783,9 +4898,9 @@ const MODELS = {
   sheep: v => {
     const w = [0xf2ede2, 0xe2d8c6, 0x4a4440][v], face = 0x3a3430;
     return {
-      body: [Ic(0.3, 0, 0.62, 0.2, w, 0.12), Ic(0.3, 0, 0.62, -0.2, w, 0.12), Ic(0.26, 0.13, 0.74, 0, w, 0.12), Ic(0.26, -0.13, 0.74, 0, w, 0.12), Ic(0.24, 0, 0.66, 0.36, w, 0.12), Ic(0.1, 0, 0.66, -0.47, w, 0.12)],
-      head: [B(0.2, 0.24, 0.3, 0, 0.74, 0.62, face), B(0.14, 0.05, 0.07, -0.14, 0.8, 0.56, face, 0, 0, 0.3), B(0.14, 0.05, 0.07, 0.14, 0.8, 0.56, face, 0, 0, -0.3),
-        Ic(0.12, 0, 0.88, 0.55, w, 0.12), Sp(0.022, 1, 1, 1, -0.085, 0.79, 0.72, 0xf0e6c8, 5), Sp(0.022, 1, 1, 1, 0.085, 0.79, 0.72, 0xf0e6c8, 5)],
+      body: [IcS(0.3, 0, 0.62, 0.2, w, 0.12), IcS(0.3, 0, 0.62, -0.2, w, 0.12), IcS(0.26, 0.13, 0.74, 0, w, 0.12), IcS(0.26, -0.13, 0.74, 0, w, 0.12), IcS(0.24, 0, 0.66, 0.36, w, 0.12), IcS(0.1, 0, 0.66, -0.47, w, 0.12)],
+      head: [RB(0.2, 0.24, 0.3, 0, 0.74, 0.62, face), RB(0.14, 0.05, 0.07, -0.14, 0.8, 0.56, face, 0, 0, 0.3), RB(0.14, 0.05, 0.07, 0.14, 0.8, 0.56, face, 0, 0, -0.3),
+        IcS(0.12, 0, 0.88, 0.55, w, 0.12), Sp(0.022, 1, 1, 1, -0.085, 0.79, 0.72, 0xf0e6c8, 5), Sp(0.022, 1, 1, 1, 0.085, 0.79, 0.72, 0xf0e6c8, 5)],
       pivot: [0, 0.7, 0.42], leg: legGeo(0.07, 0.42, face), legs: quadLegs(0.13, 0.42, 0.22),
     };
   },
@@ -4793,9 +4908,9 @@ const MODELS = {
     const c = 0xd8743a, wh = 0xf4ece0, dark = 0x3a2a22;
     const tail = new THREE.ConeGeometry(0.1, 0.55, 6); tail.rotateX(-Math.PI / 2 - 0.25); tail.translate(0, 0.52, -0.56);
     return {
-      body: [B(0.24, 0.24, 0.62, 0, 0.45, 0, c), B(0.2, 0.16, 0.2, 0, 0.4, 0.25, wh), colGeo(tail, c), Sp(0.065, 1, 1, 1.3, 0, 0.59, -0.84, wh)],
-      head: [B(0.22, 0.2, 0.22, 0, 0.6, 0.4, c), B(0.1, 0.08, 0.16, 0, 0.56, 0.57, wh), Sp(0.025, 1, 1, 1, 0, 0.58, 0.65, dark, 5),
-        Co(0.06, 0.13, 4, -0.07, 0.76, 0.38, dark, 0), Co(0.06, 0.13, 4, 0.07, 0.76, 0.38, dark, 0),
+      body: [RB(0.24, 0.24, 0.62, 0, 0.45, 0, c), RB(0.2, 0.16, 0.2, 0, 0.4, 0.25, wh), colGeo(tail, c), Sp(0.065, 1, 1, 1.3, 0, 0.59, -0.84, wh)],
+      head: [RB(0.22, 0.2, 0.22, 0, 0.6, 0.4, c), RB(0.1, 0.08, 0.16, 0, 0.56, 0.57, wh), Sp(0.025, 1, 1, 1, 0, 0.58, 0.65, dark, 5),
+        CoS(0.06, 0.13, 4, -0.07, 0.76, 0.38, dark, 0), CoS(0.06, 0.13, 4, 0.07, 0.76, 0.38, dark, 0),
         Sp(0.02, 1, 1, 1, -0.07, 0.64, 0.51, EYE_C, 5), Sp(0.02, 1, 1, 1, 0.07, 0.64, 0.51, EYE_C, 5)],
       pivot: [0, 0.52, 0.3], leg: legGeo(0.06, 0.34, dark), legs: quadLegs(0.08, 0.34, 0.22),
     };
@@ -4803,48 +4918,48 @@ const MODELS = {
   duck: v => {
     const c = v ? 0x9a7a58 : 0xb3ab9e;
     return {
-      body: [Sp(0.17, 1, 0.7, 1.4, 0, 0.07, 0, c), B(0.1, 0.05, 0.12, 0, 0.13, -0.25, dk(c, 0.7), -0.4), Sp(0.1, 0.6, 0.5, 1.6, -0.12, 0.11, -0.02, dk(c, 0.8)), Sp(0.1, 0.6, 0.5, 1.6, 0.12, 0.11, -0.02, dk(c, 0.8))],
-      head: [Sp(0.085, 1, 1, 1.1, 0, 0.25, 0.18, v ? 0x8a6a4a : 0x2f6b3a), ...(v ? [] : [Cy(0.06, 0.07, 0.025, 8, 0, 0.17, 0.17, 0xffffff)]),
-        B(0.06, 0.025, 0.1, 0, 0.24, 0.29, 0xe8a030), Sp(0.015, 1, 1, 1, -0.06, 0.28, 0.23, EYE_C, 5), Sp(0.015, 1, 1, 1, 0.06, 0.28, 0.23, EYE_C, 5)],
+      body: [Sp(0.17, 1, 0.7, 1.4, 0, 0.07, 0, c), RB(0.1, 0.05, 0.12, 0, 0.13, -0.25, dk(c, 0.7), -0.4), Sp(0.1, 0.6, 0.5, 1.6, -0.12, 0.11, -0.02, dk(c, 0.8)), Sp(0.1, 0.6, 0.5, 1.6, 0.12, 0.11, -0.02, dk(c, 0.8))],
+      head: [Sp(0.085, 1, 1, 1.1, 0, 0.25, 0.18, v ? 0x8a6a4a : 0x2f6b3a), ...(v ? [] : [CyS(0.06, 0.07, 0.025, 8, 0, 0.17, 0.17, 0xffffff)]),
+        RB(0.06, 0.025, 0.1, 0, 0.24, 0.29, 0xe8a030), Sp(0.015, 1, 1, 1, -0.06, 0.28, 0.23, EYE_C, 5), Sp(0.015, 1, 1, 1, 0.06, 0.28, 0.23, EYE_C, 5)],
       pivot: [0, 0.15, 0.15],
     };
   },
   cat: (v, c) => ({
-    body: [B(0.18, 0.18, 0.46, 0, 0.3, 0, c), B(0.04, 0.04, 0.36, 0, 0.46, -0.36, c, 0.9)],
-    head: [B(0.2, 0.17, 0.17, 0, 0.42, 0.28, c), Co(0.045, 0.09, 4, -0.06, 0.54, 0.27, c, 0), Co(0.045, 0.09, 4, 0.06, 0.54, 0.27, c, 0),
-      Ic(0.022, -0.05, 0.44, 0.365, 0x7ac85a, 0), Ic(0.022, 0.05, 0.44, 0.365, 0x7ac85a, 0), Ic(0.015, 0, 0.4, 0.37, 0xe8a5a5, 0)],
+    body: [RB(0.18, 0.18, 0.46, 0, 0.3, 0, c), RB(0.04, 0.04, 0.36, 0, 0.46, -0.36, c, 0.9)],
+    head: [RB(0.2, 0.17, 0.17, 0, 0.42, 0.28, c), CoS(0.045, 0.09, 4, -0.06, 0.54, 0.27, c, 0), CoS(0.045, 0.09, 4, 0.06, 0.54, 0.27, c, 0),
+      IcS(0.022, -0.05, 0.44, 0.365, 0x7ac85a, 0), IcS(0.022, 0.05, 0.44, 0.365, 0x7ac85a, 0), IcS(0.015, 0, 0.4, 0.37, 0xe8a5a5, 0)],
     pivot: [0, 0.36, 0.2], leg: legGeo(0.05, 0.22, dk(c, 0.9)), legs: quadLegs(0.06, 0.22, 0.16),
   }),
   dog: (v, c) => ({
-    body: [B(0.26, 0.26, 0.62, 0, 0.5, 0, c), B(0.05, 0.05, 0.32, 0, 0.64, -0.4, c, 0.7)],
-    head: [B(0.24, 0.22, 0.26, 0, 0.68, 0.4, c), B(0.13, 0.1, 0.16, 0, 0.62, 0.58, lt(c, 0.2)), Ic(0.03, 0, 0.66, 0.67, EYE_C, 0),
-      B(0.06, 0.17, 0.1, -0.14, 0.64, 0.38, dk(c, 0.75), 0, 0, 0.2), B(0.06, 0.17, 0.1, 0.14, 0.64, 0.38, dk(c, 0.75), 0, 0, -0.2),
-      Ic(0.022, -0.06, 0.73, 0.53, EYE_C, 0), Ic(0.022, 0.06, 0.73, 0.53, EYE_C, 0), B(0.27, 0.04, 0.27, 0, 0.57, 0.3, 0xc8403a)],
+    body: [RB(0.26, 0.26, 0.62, 0, 0.5, 0, c), RB(0.05, 0.05, 0.32, 0, 0.64, -0.4, c, 0.7)],
+    head: [RB(0.24, 0.22, 0.26, 0, 0.68, 0.4, c), RB(0.13, 0.1, 0.16, 0, 0.62, 0.58, lt(c, 0.2)), IcS(0.03, 0, 0.66, 0.67, EYE_C, 0),
+      RB(0.06, 0.17, 0.1, -0.14, 0.64, 0.38, dk(c, 0.75), 0, 0, 0.2), RB(0.06, 0.17, 0.1, 0.14, 0.64, 0.38, dk(c, 0.75), 0, 0, -0.2),
+      IcS(0.022, -0.06, 0.73, 0.53, EYE_C, 0), IcS(0.022, 0.06, 0.73, 0.53, EYE_C, 0), colGeo(new THREE.TorusGeometry(0.115, 0.022, 8, 22).rotateX(Math.PI / 2 - 0.55).translate(0, 0.6, 0.3), 0xc8403a)],
     pivot: [0, 0.58, 0.28], leg: legGeo(0.07, 0.38, dk(c, 0.9)), legs: quadLegs(0.09, 0.38, 0.22),
   }),
   chicken: (v, c) => ({
-    body: [Sp(0.16, 1, 1, 1.25, 0, 0.32, 0, c), Co(0.1, 0.22, 5, 0, 0.44, -0.2, dk(c, 0.9), 0)],
-    head: [Sp(0.08, 1, 1.1, 1, 0, 0.52, 0.13, c), B(0.03, 0.07, 0.08, 0, 0.62, 0.13, 0xd83a2a), B(0.04, 0.03, 0.06, 0, 0.5, 0.22, 0xe8a030), B(0.025, 0.05, 0.025, 0, 0.45, 0.18, 0xd83a2a),
-      Ic(0.015, -0.05, 0.54, 0.18, EYE_C, 0), Ic(0.015, 0.05, 0.54, 0.18, EYE_C, 0)],
+    body: [Sp(0.16, 1, 1, 1.25, 0, 0.32, 0, c), CoS(0.1, 0.22, 5, 0, 0.44, -0.2, dk(c, 0.9), 0)],
+    head: [Sp(0.08, 1, 1.1, 1, 0, 0.52, 0.13, c), RB(0.03, 0.07, 0.08, 0, 0.62, 0.13, 0xd83a2a), RB(0.04, 0.03, 0.06, 0, 0.5, 0.22, 0xe8a030), RB(0.025, 0.05, 0.025, 0, 0.45, 0.18, 0xd83a2a),
+      IcS(0.015, -0.05, 0.54, 0.18, EYE_C, 0), IcS(0.015, 0.05, 0.54, 0.18, EYE_C, 0)],
     pivot: [0, 0.4, 0.1], leg: legGeo(0.03, 0.18, 0xe8a030), legs: [[-0.06, 0.18, 0], [0.06, 0.18, 0]],
   }),
   pig: (v, c) => {
     const snout = new THREE.CylinderGeometry(0.08, 0.08, 0.06, 10); snout.rotateX(Math.PI / 2); snout.translate(0, 0.52, 0.65);
     const spots = v === 1 ? [Sp(0.12, 1, 0.5, 1, 0.2, 0.62, 0.1, 0x4a3e3e), Sp(0.1, 1, 0.5, 1, -0.18, 0.55, -0.25, 0x4a3e3e)] : [];
     return {
-      body: [Sp(0.3, 1, 0.9, 1.5, 0, 0.5, 0, c), ...spots, B(0.03, 0.03, 0.12, 0, 0.6, -0.46, c, 0.8)],
-      head: [Sp(0.2, 1, 0.95, 1, 0, 0.56, 0.45, c), colGeo(snout, dk(c, 0.85)), Co(0.06, 0.12, 4, -0.1, 0.74, 0.44, c, 0), Co(0.06, 0.12, 4, 0.1, 0.74, 0.44, c, 0),
-        Ic(0.02, -0.08, 0.62, 0.61, EYE_C, 0), Ic(0.02, 0.08, 0.62, 0.61, EYE_C, 0)],
+      body: [Sp(0.3, 1, 0.9, 1.5, 0, 0.5, 0, c), ...spots, RB(0.03, 0.03, 0.12, 0, 0.6, -0.46, c, 0.8)],
+      head: [Sp(0.2, 1, 0.95, 1, 0, 0.56, 0.45, c), colGeo(snout, dk(c, 0.85)), CoS(0.06, 0.12, 4, -0.1, 0.74, 0.44, c, 0), CoS(0.06, 0.12, 4, 0.1, 0.74, 0.44, c, 0),
+        IcS(0.02, -0.08, 0.62, 0.61, EYE_C, 0), IcS(0.02, 0.08, 0.62, 0.61, EYE_C, 0)],
       pivot: [0, 0.5, 0.3], leg: legGeo(0.09, 0.3, dk(c, 0.9)), legs: quadLegs(0.14, 0.3, 0.25),
     };
   },
   cow: (v, c) => {
-    const spots = v === 0 ? [B(0.62, 0.3, 0.4, 0, 1.1, 0.2, 0x2a2a2a), B(0.62, 0.25, 0.3, 0, 0.95, -0.35, 0x2a2a2a)] : [];
-    const shag = v === 1 ? [B(0.36, 0.14, 0.2, 0, 1.4, 0.9, lt(c, 0.15))] : [];
+    const spots = v === 0 ? [RB(0.62, 0.3, 0.4, 0, 1.1, 0.2, 0x2a2a2a), RB(0.62, 0.25, 0.3, 0, 0.95, -0.35, 0x2a2a2a)] : [];
+    const shag = v === 1 ? [RB(0.36, 0.14, 0.2, 0, 1.4, 0.9, lt(c, 0.15))] : [];
     return {
-      body: [B(0.6, 0.6, 1.3, 0, 1.0, 0, c), ...spots, Sp(0.12, 1, 0.6, 1, 0, 0.66, -0.2, 0xf0b0b0), B(0.06, 0.5, 0.06, 0, 0.95, -0.66, dk(c, 0.8), 0.25)],
-      head: [B(0.34, 0.36, 0.42, 0, 1.22, 0.82, c), B(0.3, 0.18, 0.12, 0, 1.1, 1.06, 0xe8b0a8), Co(0.04, 0.2, 5, -0.2, 1.46, 0.76, 0xe8e0c8, 0), Co(0.04, 0.2, 5, 0.2, 1.46, 0.76, 0xe8e0c8, 0),
-        B(0.14, 0.06, 0.08, -0.24, 1.3, 0.74, c), B(0.14, 0.06, 0.08, 0.24, 1.3, 0.74, c), Ic(0.03, -0.12, 1.3, 1.03, EYE_C, 0), Ic(0.03, 0.12, 1.3, 1.03, EYE_C, 0), ...shag],
+      body: [RB(0.6, 0.6, 1.3, 0, 1.0, 0, c), ...spots, Sp(0.12, 1, 0.6, 1, 0, 0.66, -0.2, 0xf0b0b0), RB(0.06, 0.5, 0.06, 0, 0.95, -0.66, dk(c, 0.8), 0.25)],
+      head: [RB(0.34, 0.36, 0.42, 0, 1.22, 0.82, c), RB(0.3, 0.18, 0.12, 0, 1.1, 1.06, 0xe8b0a8), CoS(0.04, 0.2, 5, -0.2, 1.46, 0.76, 0xe8e0c8, 0), CoS(0.04, 0.2, 5, 0.2, 1.46, 0.76, 0xe8e0c8, 0),
+        RB(0.14, 0.06, 0.08, -0.24, 1.3, 0.74, c), RB(0.14, 0.06, 0.08, 0.24, 1.3, 0.74, c), IcS(0.03, -0.12, 1.3, 1.03, EYE_C, 0), IcS(0.03, 0.12, 1.3, 1.03, EYE_C, 0), ...shag],
       pivot: [0, 1.15, 0.62], leg: legGeo(0.12, 0.72, dk(c, 0.85)), legs: quadLegs(0.2, 0.72, 0.48), stride: 0.8,
     };
   },
@@ -4857,41 +4972,41 @@ const MODELS = {
   elder: (v, c) => humanoid({ skin: SKINS[(v + 3) % SKINS.length], shirt: c, pants: 0x6a5a4a, hair: 0xdcdcdc, glasses: true }),
   gnome: (v, c) => humanoid({ skin: SKINS[0], shirt: 0x4a6aa8, pants: 0x6a5a3a, hair: 0xf0f0f0, hat: 'gnome', hatCol: c, beard: true }),
   fairy: (v, c) => ({
-    body: [Ic(0.055, 0, 0.15, 0, SKINS[0], 0), B(0.12, 0.04, 0.12, 0, 0.2, -0.01, lt(c, 0.2)), Co(0.07, 0.16, 6, 0, -0.08, 0, c, 0)],
+    body: [IcS(0.055, 0, 0.15, 0, SKINS[0], 0), RB(0.12, 0.04, 0.12, 0, 0.2, -0.01, lt(c, 0.2)), CoS(0.07, 0.16, 6, 0, -0.08, 0, c, 0)],
     glow: [Sp(0.05, 1, 1.6, 1, 0, 0.02, 0, 0xffffff)],
     wing: wingGeo(0.24, 0.2, lt(c, 0.55)), wings: [[0.02, 0.08, -0.05], [0.02, -0.01, -0.06]],
   }),
   dragon: (v, c) => {
     const belly = lt(c, 0.45), horn = 0xeee4c8;
-    const tail = mergeGeometries([colGeo(limb(0.45, 0.3, new V3(0, 1.75, -1.1), new V3(0, 1.35, -2.8), 8), c), colGeo(limb(0.3, 0.08, new V3(0, 1.35, -2.8), new V3(0, 1.0, -4.4), 6), c)]);
+    const tail = mergeGeometries([colGeo(limbS(0.45, 0.3, new V3(0, 1.75, -1.1), new V3(0, 1.35, -2.8), 8), c), colGeo(limbS(0.3, 0.08, new V3(0, 1.35, -2.8), new V3(0, 1.0, -4.4), 6), c)]);
     const tip = new THREE.ConeGeometry(0.28, 0.55, 4); tip.rotateX(-Math.PI / 2); tip.scale(1, 0.3, 1); tip.translate(0, 1.0, -4.65);
     const spikes = [];
-    for (let i = 0; i < 6; i++) { const z = 0.9 - i * 0.42; spikes.push(Co(0.08, 0.28, 4, 0, 1.7 + 0.68 * Math.sqrt(Math.max(0, 1 - (z / 1.36) ** 2)) + 0.1, z, dk(c, 0.7), 0)); }
+    for (let i = 0; i < 6; i++) { const z = 0.9 - i * 0.42; spikes.push(CoS(0.08, 0.28, 4, 0, 1.7 + 0.68 * Math.sqrt(Math.max(0, 1 - (z / 1.36) ** 2)) + 0.1, z, dk(c, 0.7), 0)); }
     const hornG = s => { const g = new THREE.ConeGeometry(0.07, 0.45, 5); g.rotateX(-0.9); g.translate(s * 0.17, 3.52, 2.12); return colGeo(g, horn); };
     return {
       body: [Sp(0.8, 1, 0.85, 1.7, 0, 1.7, 0, c), Sp(0.62, 1, 0.7, 1.4, 0, 1.5, 0.15, belly), tail, colGeo(tip, dk(c, 0.7)), ...spikes],
-      head: [colGeo(limb(0.36, 0.26, new V3(0, 2.0, 1.0), new V3(0, 3.0, 2.0), 7), c), B(0.5, 0.46, 0.8, 0, 3.15, 2.35, c), B(0.36, 0.26, 0.4, 0, 3.02, 2.85, c), B(0.34, 0.1, 0.38, 0, 2.88, 2.8, dk(c, 0.8)),
-        hornG(-1), hornG(1), Ic(0.06, -0.22, 3.28, 2.6, GOLD_EYE, 0), Ic(0.06, 0.22, 3.28, 2.6, GOLD_EYE, 0), Ic(0.03, -0.08, 3.08, 3.05, EYE_C, 0), Ic(0.03, 0.08, 3.08, 3.05, EYE_C, 0)],
-      pivot: [0, 2.0, 1.0], leg: mergeGeometries([legGeo(0.26, 1.05, dk(c, 0.85)), B(0.3, 0.1, 0.42, 0, -1.03, 0.1, dk(c, 0.7))]), legs: quadLegs(0.45, 1.08, 0.7),
+      head: [colGeo(limbS(0.36, 0.26, new V3(0, 2.0, 1.0), new V3(0, 3.0, 2.0), 7), c), RB(0.5, 0.46, 0.8, 0, 3.15, 2.35, c), RB(0.36, 0.26, 0.4, 0, 3.02, 2.85, c), RB(0.34, 0.1, 0.38, 0, 2.88, 2.8, dk(c, 0.8)),
+        hornG(-1), hornG(1), IcS(0.06, -0.22, 3.28, 2.6, GOLD_EYE, 0), IcS(0.06, 0.22, 3.28, 2.6, GOLD_EYE, 0), IcS(0.03, -0.08, 3.08, 3.05, EYE_C, 0), IcS(0.03, 0.08, 3.08, 3.05, EYE_C, 0)],
+      pivot: [0, 2.0, 1.0], leg: mergeGeometries([legGeo(0.26, 1.05, dk(c, 0.85)), RB(0.3, 0.1, 0.42, 0, -1.03, 0.1, dk(c, 0.7))]), legs: quadLegs(0.45, 1.08, 0.7),
       wing: dragonWing(dk(c, 0.85)), wings: [[0.45, 2.3, 0.3]], stride: 0.6, mouth: [0, 3.0, 3.1],
     };
   },
   trex: (v, c) => {
     const tail = new THREE.ConeGeometry(0.62, 3.0, 8); tail.rotateX(-Math.PI / 2 + 0.12); tail.translate(0, 2.35, -2.4);
     return {
-      body: [Sp(0.9, 1, 0.95, 1.7, 0, 2.5, 0, c), Sp(0.7, 1, 0.8, 1.4, 0, 2.25, 0.2, lt(c, 0.35)), colGeo(tail, c), B(0.12, 0.42, 0.12, -0.42, 2.3, 1.25, c, 0.9), B(0.12, 0.42, 0.12, 0.42, 2.3, 1.25, c, 0.9)],
-      head: [B(0.6, 0.7, 0.8, 0, 3.0, 1.4, c, 0.5), B(0.78, 0.72, 1.25, 0, 3.45, 2.05, c), B(0.66, 0.24, 1.05, 0, 3.0, 2.05, dk(c, 0.85)), B(0.6, 0.07, 0.95, 0, 3.14, 2.1, 0xf4ecd8),
-        Ic(0.07, -0.36, 3.62, 2.3, GOLD_EYE, 0), Ic(0.07, 0.36, 3.62, 2.3, GOLD_EYE, 0)],
-      pivot: [0, 2.9, 1.2], leg: mergeGeometries([legGeo(0.5, 1.9, dk(c, 0.92)), B(0.5, 0.12, 0.7, 0, -1.88, 0.15, dk(c, 0.7))]), legs: [[-0.55, 1.95, 0], [0.55, 1.95, 0]], stride: 0.35, mouth: [0, 3.2, 2.8],
+      body: [Sp(0.9, 1, 0.95, 1.7, 0, 2.5, 0, c), Sp(0.7, 1, 0.8, 1.4, 0, 2.25, 0.2, lt(c, 0.35)), colGeo(tail, c), RB(0.12, 0.42, 0.12, -0.42, 2.3, 1.25, c, 0.9), RB(0.12, 0.42, 0.12, 0.42, 2.3, 1.25, c, 0.9)],
+      head: [RB(0.6, 0.7, 0.8, 0, 3.0, 1.4, c, 0.5), RB(0.78, 0.72, 1.25, 0, 3.45, 2.05, c), RB(0.66, 0.24, 1.05, 0, 3.0, 2.05, dk(c, 0.85)), RB(0.6, 0.07, 0.95, 0, 3.14, 2.1, 0xf4ecd8),
+        IcS(0.07, -0.36, 3.62, 2.3, GOLD_EYE, 0), IcS(0.07, 0.36, 3.62, 2.3, GOLD_EYE, 0)],
+      pivot: [0, 2.9, 1.2], leg: mergeGeometries([legGeo(0.5, 1.9, dk(c, 0.92)), RB(0.5, 0.12, 0.7, 0, -1.88, 0.15, dk(c, 0.7))]), legs: [[-0.55, 1.95, 0], [0.55, 1.95, 0]], stride: 0.35, mouth: [0, 3.2, 2.8],
     };
   },
   raptor: (v, c) => {
     const tail = new THREE.ConeGeometry(0.2, 1.5, 6); tail.rotateX(-Math.PI / 2 + 0.1); tail.translate(0, 1.05, -1.2);
     return {
-      body: [Sp(0.32, 1, 0.9, 1.8, 0, 1.05, 0, c), colGeo(tail, c), B(0.34, 0.06, 0.12, 0, 1.3, 0.1, dk(c, 0.7)), B(0.34, 0.06, 0.12, 0, 1.28, -0.2, dk(c, 0.7)),
-        B(0.06, 0.25, 0.06, -0.16, 0.95, 0.45, c, 0.8), B(0.06, 0.25, 0.06, 0.16, 0.95, 0.45, c, 0.8)],
-      head: [B(0.18, 0.45, 0.2, 0, 1.3, 0.55, c, 0.5), B(0.24, 0.24, 0.55, 0, 1.55, 0.85, c), B(0.2, 0.08, 0.45, 0, 1.42, 0.86, dk(c, 0.85)), Ic(0.03, -0.12, 1.62, 0.95, GOLD_EYE, 0), Ic(0.03, 0.12, 1.62, 0.95, GOLD_EYE, 0)],
-      pivot: [0, 1.25, 0.45], leg: mergeGeometries([legGeo(0.13, 0.88, dk(c, 0.85)), B(0.14, 0.06, 0.3, 0, -0.88, 0.08, dk(c, 0.7))]), legs: [[-0.16, 0.92, 0], [0.16, 0.92, 0]], stride: 0.75,
+      body: [Sp(0.32, 1, 0.9, 1.8, 0, 1.05, 0, c), colGeo(tail, c), RB(0.34, 0.06, 0.12, 0, 1.3, 0.1, dk(c, 0.7)), RB(0.34, 0.06, 0.12, 0, 1.28, -0.2, dk(c, 0.7)),
+        RB(0.06, 0.25, 0.06, -0.16, 0.95, 0.45, c, 0.8), RB(0.06, 0.25, 0.06, 0.16, 0.95, 0.45, c, 0.8)],
+      head: [RB(0.18, 0.45, 0.2, 0, 1.3, 0.55, c, 0.5), RB(0.24, 0.24, 0.55, 0, 1.55, 0.85, c), RB(0.2, 0.08, 0.45, 0, 1.42, 0.86, dk(c, 0.85)), IcS(0.03, -0.12, 1.62, 0.95, GOLD_EYE, 0), IcS(0.03, 0.12, 1.62, 0.95, GOLD_EYE, 0)],
+      pivot: [0, 1.25, 0.45], leg: mergeGeometries([legGeo(0.13, 0.88, dk(c, 0.85)), RB(0.14, 0.06, 0.3, 0, -0.88, 0.08, dk(c, 0.7))]), legs: [[-0.16, 0.92, 0], [0.16, 0.92, 0]], stride: 0.75,
     };
   },
   trike: (v, c) => {
@@ -4900,27 +5015,27 @@ const MODELS = {
     const tail = new THREE.ConeGeometry(0.45, 1.8, 7); tail.rotateX(-Math.PI / 2 + 0.15); tail.translate(0, 1.4, -2.1);
     return {
       body: [Sp(1.0, 1, 0.85, 1.6, 0, 1.55, -0.1, c), colGeo(tail, c)],
-      head: [colGeo(frill, lt(c, 0.25)), B(0.7, 0.65, 0.95, 0, 1.5, 2.15, c), B(0.5, 0.3, 0.4, 0, 1.3, 2.65, dk(c, 0.85)), horn(-0.25, 1.9, 2.55, 0.75, 0.08), horn(0.25, 1.9, 2.55, 0.75, 0.08), horn(0, 1.55, 2.85, 0.35, 0.07),
-        Ic(0.05, -0.33, 1.7, 2.35, EYE_C, 0), Ic(0.05, 0.33, 1.7, 2.35, EYE_C, 0)],
+      head: [colGeo(frill, lt(c, 0.25)), RB(0.7, 0.65, 0.95, 0, 1.5, 2.15, c), RB(0.5, 0.3, 0.4, 0, 1.3, 2.65, dk(c, 0.85)), horn(-0.25, 1.9, 2.55, 0.75, 0.08), horn(0.25, 1.9, 2.55, 0.75, 0.08), horn(0, 1.55, 2.85, 0.35, 0.07),
+        IcS(0.05, -0.33, 1.7, 2.35, EYE_C, 0), IcS(0.05, 0.33, 1.7, 2.35, EYE_C, 0)],
       pivot: [0, 1.6, 1.4], leg: legGeo(0.36, 1.15, dk(c, 0.9)), legs: quadLegs(0.55, 1.15, 0.8), stride: 0.45,
     };
   },
   stego: (v, c) => {
     const plates = [], acc = lt(c, 0.3);
-    for (let i = 0; i < 7; i++) { const z = 1.1 - i * 0.38, h = 0.45 + Math.sin(i / 6 * Math.PI) * 0.45; plates.push(B(0.07, h, 0.4, i % 2 ? 0.09 : -0.09, 2.15 + h / 2 - Math.abs(z) * 0.18, z, i % 2 ? acc : dk(acc, 0.85))); }
+    for (let i = 0; i < 7; i++) { const z = 1.1 - i * 0.38, h = 0.45 + Math.sin(i / 6 * Math.PI) * 0.45; plates.push(RB(0.07, h, 0.4, i % 2 ? 0.09 : -0.09, 2.15 + h / 2 - Math.abs(z) * 0.18, z, i % 2 ? acc : dk(acc, 0.85))); }
     const tail = new THREE.ConeGeometry(0.4, 2.0, 7); tail.rotateX(-Math.PI / 2 + 0.2); tail.translate(0, 1.5, -2.0);
     const spike = s => { const g = new THREE.ConeGeometry(0.06, 0.55, 5); g.rotateZ(s * (Math.PI / 2 - 0.4)); g.translate(s * 0.25, 1.2, -2.6); return colGeo(g, 0xf0e6c8); };
     return {
       body: [Sp(1.0, 1, 0.85, 1.7, 0, 1.6, 0, c), ...plates, colGeo(tail, c), spike(-1), spike(1)],
-      head: [B(0.35, 0.35, 0.65, 0, 1.15, 1.75, c, 0.5), B(0.36, 0.32, 0.55, 0, 0.95, 2.2, c), Ic(0.04, -0.17, 1.02, 2.35, EYE_C, 0), Ic(0.04, 0.17, 1.02, 2.35, EYE_C, 0)],
+      head: [RB(0.35, 0.35, 0.65, 0, 1.15, 1.75, c, 0.5), RB(0.36, 0.32, 0.55, 0, 0.95, 2.2, c), IcS(0.04, -0.17, 1.02, 2.35, EYE_C, 0), IcS(0.04, 0.17, 1.02, 2.35, EYE_C, 0)],
       pivot: [0, 1.3, 1.5], leg: legGeo(0.32, 1.3, dk(c, 0.9)), legs: quadLegs(0.5, 1.3, 0.75), stride: 0.45,
     };
   },
   bronto: (v, c) => {
-    const tail = mergeGeometries([colGeo(limb(0.65, 0.35, new V3(0, 2.9, -2.0), new V3(0, 2.2, -4.8), 8), c), colGeo(limb(0.35, 0.06, new V3(0, 2.2, -4.8), new V3(0, 1.2, -7.6), 6), c)]);
+    const tail = mergeGeometries([colGeo(limbS(0.65, 0.35, new V3(0, 2.9, -2.0), new V3(0, 2.2, -4.8), 8), c), colGeo(limbS(0.35, 0.06, new V3(0, 2.2, -4.8), new V3(0, 1.2, -7.6), 6), c)]);
     return {
       body: [Sp(1.45, 1, 0.9, 1.75, 0, 2.9, 0, c), Sp(1.2, 1, 0.7, 1.4, 0, 2.5, 0.1, lt(c, 0.3)), tail],
-      head: [colGeo(limb(0.5, 0.28, new V3(0, 3.0, 1.6), new V3(0, 6.4, 4.0), 8), c), B(0.5, 0.42, 0.85, 0, 6.5, 4.35, c), Ic(0.06, -0.22, 6.62, 4.55, EYE_C, 0), Ic(0.06, 0.22, 6.62, 4.55, EYE_C, 0)],
+      head: [colGeo(limbS(0.5, 0.28, new V3(0, 3.0, 1.6), new V3(0, 6.4, 4.0), 8), c), RB(0.5, 0.42, 0.85, 0, 6.5, 4.35, c), IcS(0.06, -0.22, 6.62, 4.55, EYE_C, 0), IcS(0.06, 0.22, 6.62, 4.55, EYE_C, 0)],
       pivot: [0, 3.0, 1.6], leg: legGeo(0.6, 2.3, dk(c, 0.9)), legs: quadLegs(0.8, 2.3, 1.3), stride: 0.25,
     };
   },
@@ -4986,7 +5101,7 @@ function animalModel(type, v) {
 // the visual model on its own: used for the creatures themselves and for catalog pictures
 function buildCreature(type, v) {
   const M = animalModel(type, v), g = new THREE.Group(), out = { g, head: null, legs: [], arms: [], wings: [] };
-  const mesh = (geo, mat = matFlat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; return m; };
+  const mesh = (geo, mat = creatureMat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; return m; };
   g.add(mesh(M.body));
   if (M.glow) g.add(mesh(M.glow, glowMats.lamp));
   if (M.head) {
