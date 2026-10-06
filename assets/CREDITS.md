@@ -58,3 +58,51 @@ Used unmodified apart from scaling and colour tinting in the game.
 | tool_pick.glb | Pickaxe by CreativeTrio | https://poly.pizza/m/cJp88qPPLc |
 | tool_pick_stone.glb | Stone Pickaxe by Quaternius | https://poly.pizza/m/pvOeJ5EcpW |
 | tool_spade.glb | Spade by CreativeTrio | https://poly.pizza/m/570CC3ij3V |
+
+## Furniture — CC0 1.0 (public domain)
+
+| File | Model | Source |
+|---|---|---|
+| furn_bed.glb | Bed Single by Quaternius | https://poly.pizza/m/ianC28eMOF |
+| furn_doublebed.glb | Bed Double by Quaternius | https://poly.pizza/m/BuRay4fVFr |
+| furn_bunkbed.glb | Bunk Bed by Quaternius | https://poly.pizza/m/XpysaEDXJQ |
+| furn_sofa.glb | Sofa by Quaternius | https://poly.pizza/m/vuo7KBehok |
+| furn_loveseat.glb | Couch Small by Quaternius | https://poly.pizza/m/ZOPP3KzNIk |
+| furn_armchair.glb | Chair by Quaternius | https://poly.pizza/m/9kIjuRFMFw |
+| furn_chair.glb | Chair by Quaternius | https://poly.pizza/m/iMNqRzPwwe |
+| furn_table.glb | Small Table by Quaternius | https://poly.pizza/m/rAEBvfb1FT |
+| furn_roundtable.glb | Table Round Small by Quaternius | https://poly.pizza/m/oEArSZykyi |
+| furn_diningtable.glb | Table by Quaternius | https://poly.pizza/m/yYEEJzKxb4 |
+| furn_coffeetable.glb | Table by Quaternius | https://poly.pizza/m/gQFkiM8PlM |
+| furn_desk.glb | Desk by Quaternius | https://poly.pizza/m/V86Go2rlnq |
+| furn_shelf.glb | Bookcase with Books by Quaternius | https://poly.pizza/m/tACDGJ4CGW |
+| furn_wardrobe.glb | Closet by Quaternius | https://poly.pizza/m/BHEVb1DIuH |
+| furn_dresser.glb | Drawer by Quaternius | https://poly.pizza/m/N3ERi89OeO |
+| furn_nightstand.glb | Drawer by Quaternius | https://poly.pizza/m/G1H0wnCHQf |
+| furn_range.glb | Stove by CreativeTrio | https://poly.pizza/m/EwEDIUf1hQ |
+| furn_bathtub.glb | Bathtub by CreativeTrio | https://poly.pizza/m/2MbbdwbTjt |
+| furn_washstand.glb | Bathroom Sink by Quaternius | https://poly.pizza/m/OMCJDgMUui |
+| furn_barrel.glb | Barrel by Quaternius | https://poly.pizza/m/ONdghDBByN |
+| furn_crate.glb | Crate by Quaternius | https://poly.pizza/m/3VGWnZPXmG |
+| furn_bench.glb | Bench by Quaternius | https://poly.pizza/m/jLxjFxFRpw |
+| furn_rug.glb | Round Rug by Quaternius | https://poly.pizza/m/ZYBzMHnSbM |
+| furn_rugrect.glb | Rug by Quaternius | https://poly.pizza/m/7H5qKjuxVY |
+| furn_rocker.glb | Rocking Chair by CreativeTrio | https://poly.pizza/m/Gnst85J3vK |
+| furn_grandclock.glb | Grandfathers Clock by CreativeTrio | https://poly.pizza/m/09YKIkFZnA |
+
+## Material textures — Poly Haven, CC0 1.0 (public domain)
+
+Resized to 512 px; colour and normal (OpenGL) maps in `assets/textures/`.
+
+| File | Texture | Source |
+|---|---|---|
+| wood_d.jpg, wood_n.jpg | fine_grained_wood | https://polyhaven.com/a/fine_grained_wood |
+| planks_d.jpg, planks_n.jpg | old_wooden_floor_01 | https://polyhaven.com/a/old_wooden_floor_01 |
+| stone_d.jpg, stone_n.jpg | stone_wall_04 | https://polyhaven.com/a/stone_wall_04 |
+| brick_d.jpg, brick_n.jpg | red_brick_03 | https://polyhaven.com/a/red_brick_03 |
+| plaster_d.jpg, plaster_n.jpg | painted_plaster_wall | https://polyhaven.com/a/painted_plaster_wall |
+| roof_d.jpg, roof_n.jpg | clay_roof_tiles_02 | https://polyhaven.com/a/clay_roof_tiles_02 |
+| metal_d.jpg, metal_n.jpg | metal_plate_02 | https://polyhaven.com/a/metal_plate_02 |
+| fabric_d.jpg, fabric_n.jpg | rough_linen | https://polyhaven.com/a/rough_linen |
+| tile_d.jpg, tile_n.jpg | floor_tiles_08 | https://polyhaven.com/a/floor_tiles_08 |
+| paint_d.jpg, paint_n.jpg | blue_painted_planks | https://polyhaven.com/a/blue_painted_planks |

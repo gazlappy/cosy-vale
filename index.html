@@ -170,7 +170,7 @@
     <kbd>Q</kbd><span>Empty hands (to interact)</span><kbd>I</kbd><span>Backpack</span>
     <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>P</kbd><span>Fullscreen</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
   </div>
-  <p class="small">Animal, people and tool models by Quaternius, Armory_3D and CreativeTrio (CC0); cat, hen, rooster, rabbit and mallard by Poly by Google (CC-BY 3.0) — see assets/CREDITS.md.</p>
+  <p class="small">Animal, people, tool and furniture models by Quaternius, Armory_3D and CreativeTrio (CC0); material textures from Poly Haven (CC0); cat, hen, rooster, rabbit and mallard by Poly by Google (CC-BY 3.0) — see assets/CREDITS.md.</p>
   <p class="small">Your world saves automatically in this browser. Trees and flowers regrow after a while.</p>
 </div></div>
 
@@ -474,7 +474,7 @@ const stars = (() => {
 // ---------------------------------------------------------------- geometry helpers
 // While a building part is being made, CUR_SURF is its main material; colours derived from the part's
 // chosen colour use it, other colours are classed by hue (dark greys = metal, browns = wood, ...).
-const SURF = { none: 0, wood: 1, stone: 2, brick: 3, plaster: 4, roof: 5, metal: 6, fabric: 7, tile: 8, leaf: 9, paint: 10 };
+const SURF = { none: 0, wood: 1, stone: 2, brick: 3, plaster: 4, roof: 5, metal: 6, fabric: 7, tile: 8, leaf: 9, paint: 10, planks: 11, rock: 12 };
 let CUR_SURF = null;
 const _hsl = {};
 function surfFor(col) {
@@ -513,12 +513,64 @@ const dk = (c, f = 0.72) => palTag(c, new THREE.Color(c).multiplyScalar(f));
 const lt = (c, f = 0.3) => palTag(c, new THREE.Color(c).lerp(new THREE.Color(0xffffff), f));
 
 const matVC = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0 });
+// Real material textures (Poly Haven, CC0 - see assets/CREDITS.md): one layer per surface type in a colour array and
+// a normal-map array. They're projected from three sides in world space, so any part, at any size or angle, picks up
+// properly scaled brick, boards, stone or tiles; the colour is divided by the texture's average so the colour you
+// chose for a part stays its colour.
+const TEX_LAYERS = ["wood", "stone", "brick", "plaster", "roof", "metal", "fabric", "tile", "paint", "planks"];
+const TEX_MEAN = [[66, 48, 33], [111, 103, 95], [106, 83, 75], [171, 163, 160], [145, 80, 43], [84, 73, 62], [145, 171, 205], [135, 117, 100], [85, 101, 102], [155, 104, 54]];
+const TEX_SCALE = [1.4, 2.6, 2.0, 2.4, 3.2, 1.6, 0.7, 1.8, 2.4, 4.2];
+const TEX_MIX = [0.9, 1.0, 1.0, 0.8, 1.0, 0.6, 0.6, 1.0, 0.65, 1.0];
+const TEX_NRM = [0.6, 1.0, 1.0, 0.7, 1.0, 0.6, 0.7, 0.8, 0.8, 1.0];
+const texU = { uTexA: { value: null }, uTexN: { value: null }, uTexOn: { value: 0 },
+  uTexMean: { value: TEX_MEAN.map(c => new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace)) },
+  uTexScale: { value: TEX_SCALE }, uTexMix: { value: TEX_MIX }, uTexNrm: { value: TEX_NRM } };
+(function loadMaterialTextures() {
+  const S = 512, N = TEX_LAYERS.length, col = new Uint8Array(S * S * 4 * N), nrm = new Uint8Array(S * S * 4 * N);
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+  let left = N * 2;
+  const done = () => {
+    const mk = (data, srgb) => {
+      const t = new THREE.DataArrayTexture(data, S, S, N);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+      t.anisotropy = 4; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true;
+      return t;
+    };
+    texU.uTexA.value = mk(col, true); texU.uTexN.value = mk(nrm, false); texU.uTexOn.value = 1;
+  };
+  TEX_LAYERS.forEach((name, i) => ['d', 'n'].forEach(k => {
+    const img = new Image();
+    img.onload = () => { cx.drawImage(img, 0, 0, S, S); (k === 'd' ? col : nrm).set(cx.getImageData(0, 0, S, S).data, i * S * S * 4); if (--left === 0) done(); };
+    img.onerror = () => console.warn('texture failed', name, k);
+    img.src = `assets/textures/${name}_${k}.jpg`;
+  }));
+})();
+const TEX_GLSL = `
+uniform highp sampler2DArray uTexA, uTexN; uniform float uTexOn; uniform vec3 uTexMean[10]; uniform float uTexScale[10], uTexMix[10], uTexNrm[10];
+int surfLayer(float s) {
+  int i = int(s + 0.5);
+  return i == 1 ? 0 : i == 2 ? 1 : i == 3 ? 2 : i == 4 ? 3 : i == 5 ? 4 : i == 6 ? 5 : i == 7 ? 6 : i == 8 ? 7 : i == 10 ? 8 : i == 11 ? 9 : -1;
+}
+vec3 triW(vec3 n) { vec3 w = pow(abs(n), vec3(6.0)); return w / (w.x + w.y + w.z); }
+vec3 triAlbedo(int L, vec3 p, vec3 n) {
+  vec3 w = triW(n); float k = 1.0 / uTexScale[L], l = float(L);
+  return texture(uTexA, vec3(p.zy * k, l)).rgb * w.x + texture(uTexA, vec3(p.xz * k, l)).rgb * w.y + texture(uTexA, vec3(p.xy * k, l)).rgb * w.z;
+}
+vec3 triNormal(int L, vec3 p, vec3 n) {
+  vec3 w = triW(n); float k = 1.0 / uTexScale[L], l = float(L);
+  vec3 tx = texture(uTexN, vec3(p.zy * k, l)).xyz * 2.0 - 1.0, ty = texture(uTexN, vec3(p.xz * k, l)).xyz * 2.0 - 1.0, tz = texture(uTexN, vec3(p.xy * k, l)).xyz * 2.0 - 1.0;
+  tx = vec3(tx.xy + n.zy, abs(tx.z) * n.x); ty = vec3(ty.xy + n.xz, abs(ty.z) * n.y); tz = vec3(tz.xy + n.xy, abs(tz.z) * n.z);
+  return normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z);
+}
+`;
 const SURF_GLSL = `
 float sHash(vec2 p) { p = mod(p, 289.0); return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float sNoise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(sHash(i), sHash(i + vec2(1.0, 0.0)), f.x), mix(sHash(i + vec2(0.0, 1.0)), sHash(i + vec2(1.0, 1.0)), f.x), f.y); }
 float surfaceDetail(float s, vec3 p, vec3 n, inout float rough, inout float metal) {
   if (s < 0.5) return 1.0;
+  if (s > 11.5) s = 2.0; else if (s > 10.5) s = 1.0;
   vec2 uv = abs(n.y) > 0.6 ? p.xz : (abs(n.x) > abs(n.z) ? p.zy : p.xy);
   // fade fine detail out with distance so it never shimmers
   float fine = 1.0 - clamp(length(fwidth(uv)) * 18.0, 0.0, 1.0);
@@ -541,11 +593,19 @@ float surfaceDetail(float s, vec3 p, vec3 n, inout float rough, inout float meta
 matVC.onBeforeCompile = sh => {
   sh.vertexShader = 'attribute float surf;\nvarying float vSurf;\nvarying vec3 vWPos;\nvarying vec3 vWNrm;\n' + sh.vertexShader.replace('#include <fog_vertex>',
     '#include <fog_vertex>\n  vSurf = surf; vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz; vWNrm = normalize(mat3(modelMatrix) * objectNormal);');
-  sh.fragmentShader = 'varying float vSurf;\nvarying vec3 vWPos;\nvarying vec3 vWNrm;\n' + SURF_GLSL + sh.fragmentShader
-    .replace('#include <color_fragment>', '#include <color_fragment>\n  float surfRough = -1.0, surfMetal = -1.0;\n  diffuseColor.rgb *= surfaceDetail(vSurf, vWPos, normalize(vWNrm), surfRough, surfMetal);')
+  Object.assign(sh.uniforms, texU);
+  sh.fragmentShader = 'varying float vSurf;\nvarying vec3 vWPos;\nvarying vec3 vWNrm;\n' + SURF_GLSL + TEX_GLSL + sh.fragmentShader
+    .replace('#include <color_fragment>', `#include <color_fragment>
+  float surfRough = -1.0, surfMetal = -1.0;
+  float sd = surfaceDetail(vSurf, vWPos, normalize(vWNrm), surfRough, surfMetal);
+  int sL = uTexOn > 0.5 ? surfLayer(vSurf) : -1;
+  if (sL >= 0) diffuseColor.rgb *= mix(vec3(1.0), clamp(triAlbedo(sL, vWPos, normalize(vWNrm)) / max(uTexMean[sL], vec3(0.02)), 0.0, 2.6), uTexMix[sL]);
+  else diffuseColor.rgb *= sd;`)
+    .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+  if (sL >= 0) { vec3 nW = normalize(vWNrm); if (!gl_FrontFacing) nW = -nW; vec3 tN = normalize(mix(nW, triNormal(sL, vWPos, nW), uTexNrm[sL])); normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz); }`)
     .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\n  if (surfRough >= 0.0) roughnessFactor = surfRough;\n  if (surfMetal >= 0.0) metalnessFactor = surfMetal;');
 };
-matVC.customProgramCacheKey = () => 'surf1';
+matVC.customProgramCacheKey = () => 'surf2';
 const matFlat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0, flatShading: true });
 const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
 const GROUND_FRAG = `{
@@ -1315,7 +1375,7 @@ function buildCave(ch) {
   if (!set || !set.size) return;
   const hc = new Map(), H = (x, z) => { const k = x + ',' + z; let v = hc.get(k); if (v === undefined) hc.set(k, v = heightRaw(x, z)); return v; };
   const pos = [], col = [], sf = [], c = new THREE.Color(), e1 = new V3(), e2 = new V3(), nn = new V3();
-  const STY = [[null, SURF.stone], [0x8e8a82, SURF.brick], [0x6f6a62, SURF.tile], [0x5e6450, SURF.stone]];
+  const STY = [[null, SURF.rock], [0x8e8a82, SURF.brick], [0x6f6a62, SURF.tile], [0x5e6450, SURF.rock]];
   const shade = (x, y, z, jit, sty) => {
     const depth = H(Math.round(x / 2) * 2, Math.round(z / 2) * 2) - y;
     if (sty) { c.setHex(STY[sty][0]).multiplyScalar(clamp(1 - depth / 60, 0.6, 1) * jit); return c; }
@@ -2811,6 +2871,47 @@ function toolModel(id, onReady) {
   g.add(turn);
   return g;
 }
+// real furniture models (assets/models/furn_*.glb): each is fitted inside the piece's footprint (w across, d deep,
+// front facing +z) and keeps the old procedural shape for its collision; other colours tint it relative to the first
+const PIECE_MODELS = {
+  bed: { w: 1.16, d: 2.2 }, doublebed: { w: 1.8, d: 2.2 }, bunkbed: { w: 1.1, d: 2.1 }, sofa: { w: 1.8, d: 0.85 }, loveseat: { w: 1.4, d: 0.85 },
+  armchair: { w: 0.85, d: 0.85 }, chair: { w: 0.5, d: 0.5 }, rocker: { w: 0.6, d: 0.95 }, table: { w: 1.4, d: 0.9 }, roundtable: { w: 1.1, d: 1.1 },
+  diningtable: { w: 2.4, d: 1.0 }, coffeetable: { w: 1.1, d: 0.6 }, desk: { w: 1.3, d: 0.7 }, shelf: { w: 1.26, d: 0.4 }, wardrobe: { w: 1.1, d: 0.6 },
+  dresser: { w: 1.0, d: 0.5 }, nightstand: { w: 0.5, d: 0.4 }, bathtub: { w: 1.7, d: 0.84 }, washstand: { w: 0.6, d: 0.5 }, grandclock: { w: 0.5, d: 0.36 },
+  barrel: { w: 0.64, d: 0.64 }, crate: { w: 0.9, d: 0.9 }, bench: { w: 1.4, d: 0.55 }, rug: { w: 2.0, d: 2.0 }, rugrect: { w: 2.4, d: 1.6 },
+};
+const EMPTY_GEO = new THREE.BufferGeometry();
+function pieceModel(id, v, onReady) {
+  const F = PIECE_MODELS[id];
+  if (!F) return null;
+  const m = loadModel('furn_' + id);
+  if (!m.ready) { if (onReady && !m.failed) m.cbs.push(onReady); return null; }
+  const turn = new THREE.Group(), g = new THREE.Group(), inner = m.scene.clone(true);
+  // lie it the same way as the footprint: long side across or deep
+  if ((m.size.x > m.size.z) !== (F.w > F.d) && Math.abs(F.w - F.d) > 0.05) turn.rotation.y = Math.PI / 2;
+  turn.rotation.y += F.yaw || 0;
+  turn.add(inner); turn.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(turn, true), sz = box.getSize(new V3()), c = box.getCenter(new V3());
+  const k = Math.min(F.w / sz.x, F.d / sz.z);
+  turn.scale.setScalar(k); turn.position.set(-c.x * k, -box.min.y * k, -c.z * k);
+  const pal = DEFS[id].pal;
+  let tint = null;
+  if (pal && v % pal.length) { const a = new THREE.Color(pal[0][1]), b = new THREE.Color(pal[v % pal.length][1]); tint = new THREE.Color(b.r / Math.max(0.05, a.r), b.g / Math.max(0.05, a.g), b.b / Math.max(0.05, a.b)); }
+  inner.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = o.receiveShadow = true;
+    if (tint) { const f = mt => { const n = mt.clone(); n.color.multiply(tint); return n; }; o.material = Array.isArray(o.material) ? o.material.map(f) : f(o.material); }
+  });
+  g.add(turn);
+  return g;
+}
+function attachPieceModel(rec) {
+  const g = pieceModel(rec.id, rec.v);
+  if (!g || !rec.mesh) return;
+  rec.mesh.geometry = EMPTY_GEO;
+  rec.mesh.add(g);
+  g.traverse(o => { o.userData.piece = rec; });
+}
 const TOOL = (id, name, short, icon, kind, metal, stats) => ({ id, kind: 'tool', name, short, icon, cat: 'Tools', pal: [[metal[0].toUpperCase() + metal.slice(1), METAL[metal]]], build: c => toolGeo(kind, c, metal), family: kind, ...stats, surf: metal === 'stone' ? SURF.stone : SURF.metal });
 Object.assign(DEF_LIST.find(d => d.id === 'hand'), { kind: 'tool', family: 'axe', tier: 0, mine: 1, chop: 1, pal: [['Stone', METAL.stone]], build: c => toolGeo('axe', c, 'stone'), surf: SURF.stone, name: 'Stone Axe', short: 'Axe' });
 DEF_LIST.push(
@@ -3566,6 +3667,7 @@ DEF_LIST.push(
 const PAL_SURF = new Map([[WOOD, SURF.wood], [STONE, SURF.stone], [BRICK, SURF.brick], [PLASTER, SURF.plaster], [ROOF, SURF.roof], [FABRIC, SURF.fabric], [TILE, SURF.tile], [HEDGE, SURF.leaf], [PAINT, SURF.paint], [CROPS, SURF.leaf], [METALS, SURF.metal]]);
 for (const id of ['ironfence', 'lamppost', 'anvil', 'brazier', 'beacon', 'weathervane', 'copperroof', 'goldstatue']) { const d = DEF_LIST.find(x => x.id === id); if (d) d.surf = SURF.metal; }
 for (const d of DEF_LIST) if (d.kind === 'tool') d.surf ??= SURF.metal;
+for (const d of DEF_LIST) if (d.pal === WOOD && !d.surf && !d.surfs && /^(Floors & Stairs|Walls|Roofs|Buildings)$/.test(d.cat)) d.surf = SURF.planks;
 addMats(WOOD, SURF.wood, ' wood'); addMats(STONE, SURF.stone, ' stone'); addMats(BRICK, SURF.brick, ' brick'); addMats(PLASTER, SURF.plaster, ' plaster'); addMats(ROOF, SURF.roof, ' tiles');
 addMats(METALS, SURF.metal); addMats(FABRIC, SURF.fabric, ' fabric'); addMats(TILE, SURF.tile, ' glaze'); addMats(HEDGE, SURF.leaf, ' leaves'); addMats(PAINT, SURF.paint, ' paint');
 DEF_LIST.push(
@@ -3698,6 +3800,7 @@ function createPiece(rec) {
   if (spin) { const sm = new THREE.Mesh(spin, matVC); sm.castShadow = true; sm.userData.piece = rec; mesh.add(sm); spinners.push(sm); rec.spinner = sm; }
   piecesGroup.add(mesh);
   rec.mesh = mesh;
+  if (PIECE_MODELS[rec.id]) { const mm = loadModel('furn_' + rec.id); if (mm.ready) attachPieceModel(rec); else mm.cbs.push(() => { if (pieces.includes(rec)) attachPieceModel(rec); }); }
   rec.boxes = worldBoxes(def, rec.x, rec.y, rec.z, rec.rot);
   rec.top = rec.boxes.reduce((m, b) => Math.max(m, b.maxY), rec.y);
   rec.boxes.forEach(hashAdd);
@@ -3892,6 +3995,7 @@ function partThumb(id, v) {
     }
   }
   else if (DEFS[id].kind === 'blueprint') grp = blueprintGroup(DEFS[id]);
+  else if (PIECE_MODELS[id] && (grp = pieceModel(id, v, () => { thumbCache.delete(key); imgCache.clear(); renderHotbar(); if (catalogOpen) buildCatalog(); }))) {}
   else if (TOOL_MODELS[id] && (grp = toolModel(id, () => { thumbCache.delete(key); imgCache.clear(); renderHotbar(); if (catalogOpen) buildCatalog(); if (bagOpen) renderBag(); }))) {}
   else {
     const { g, glow, spin } = pieceGeo(id, v);
