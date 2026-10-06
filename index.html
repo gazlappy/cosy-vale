@@ -123,7 +123,7 @@
 <div id="toast" class="panel"></div>
 <div id="mapHud"><canvas id="minimap" width="176" height="176"></canvas><div id="coords" class="panel"></div></div>
 <div id="hotbarWrap"><div id="selname" class="panel"></div><div id="hotbar"></div></div>
-<div id="keys" class="panel"><b>Tab</b> catalog · <b>R</b> rotate · <b>C</b> colour · <b>G</b> snap · <b>F</b> fly · <b>E</b> use · <b>Q</b> hands · <b>I</b> backpack · <b>M</b> map · <b>V</b> mute</div>
+<div id="keys" class="panel"><b>Tab</b> catalog · <b>R</b> rotate · <b>C</b> colour · <b>G</b> snap · <b>F</b> fly · <b>E</b> use · <b>Q</b> hands · <b>I</b> backpack · <b>M</b> map · <b>V</b> mute · <b>P</b> fullscreen</div>
 <div id="fade"></div>
 
 <div id="catalog" class="overlay hidden"><div class="card panel">
@@ -158,7 +158,7 @@
 <div id="menu" class="overlay"><div class="card panel">
   <h1>🌿 Cosy Vale</h1>
   <p class="sub">Wander an endless valley, gather what you need, and build a little home.</p>
-  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="weatherBtn" class="ghost">🌦️ Weather: changing</button><button id="creativeBtn" class="ghost">🌿 Creative: off</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
+  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="weatherBtn" class="ghost">🌦️ Weather: changing</button><button id="creativeBtn" class="ghost">🌿 Creative: off</button><button id="fsBtn" class="ghost">⛶ Fullscreen</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
   <div class="controls">
     <kbd>WASD</kbd><span>Walk</span><kbd>Mouse</kbd><span>Look around</span>
     <kbd>Shift</kbd><span>Run</span><kbd>Space</kbd><span>Jump / swim up</span>
@@ -168,7 +168,7 @@
     <kbd>Middle click</kbd><span>Copy the piece you look at</span><kbd>E</kbd><span>Sleep in a bed at night</span>
     <kbd>G</kbd><span>Snap to parts / free place</span><kbd>F</kbd><span>Toggle flying</span>
     <kbd>Q</kbd><span>Empty hands (to interact)</span><kbd>I</kbd><span>Backpack</span>
-    <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
+    <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>P</kbd><span>Fullscreen</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
   </div>
   <p class="small">Your world saves automatically in this browser. Trees and flowers regrow after a while.</p>
 </div></div>
@@ -4083,6 +4083,17 @@ function showMenu() { $('menu').classList.remove('hidden'); $('play').textConten
 canvas.addEventListener('click', () => { if (!active() && !catalogOpen && !craftOpen && !bagOpen && !mapOpen) lock(); });
 $('play').onclick = () => lock();
 $('clockBtn').onclick = toggleClock;
+// fullscreen: hides the browser's bars; keeps the mouse captured if you were playing
+function toggleFullscreen() {
+  const el = document.documentElement, playing = active();
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!req) { toast('⛶ Fullscreen is not available in this browser'); return; }
+  Promise.resolve(req.call(el, { navigationUI: 'hide' })).then(() => { if (playing && !freeMode && !locked) lock(); }).catch(() => toast('⛶ Fullscreen was blocked — try the button on the menu'));
+}
+function renderFsBtn() { $('fsBtn').textContent = document.fullscreenElement ? '🗗 Exit fullscreen' : '⛶ Fullscreen'; }
+$('fsBtn').onclick = toggleFullscreen;
+addEventListener('fullscreenchange', renderFsBtn);
 $('weatherBtn').onclick = cycleWeather;
 $('creativeBtn').onclick = toggleCreative;
 let newWorldArmed = false;
@@ -4124,6 +4135,7 @@ addEventListener('keydown', e => {
     case 'KeyF': toggleFly(); break;
     case 'KeyM': openMap(); break;
     case 'KeyV': toggleMute(); break;
+    case 'KeyP': toggleFullscreen(); break;
     case 'KeyE': interact(); break;
     case 'KeyI': openBag(); break;
     case 'KeyQ': curSlot = curSlot < 0 ? (lastSlot ?? 0) : (lastSlot = curSlot, -1); onSlotChange(); break;
