@@ -543,7 +543,17 @@ matVC.onBeforeCompile = sh => {
 };
 matVC.customProgramCacheKey = () => 'surf1';
 const matFlat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0, flatShading: true });
-const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0, flatShading: true });
+const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+const GROUND_FRAG = `{
+  float fine = 1.0 - clamp(length(fwidth(vOP.xz)) * 2.5, 0.0, 1.0);
+  float g1 = fbm4(vOP.xz * 0.8), g2 = fbm4(vOP.xz * 4.2 + 3.0);
+  float rocky = smoothstep(0.22, 0.45, 1.0 - clamp(vON.y, 0.0, 1.0));
+  normal = bumpN(normal, g1 * 0.45 + g2 * 0.55 * fine, 0.3 + rocky * 0.5);
+  diffuseColor.rgb *= 0.86 + g1 * 0.24 + (g2 - 0.47) * 0.2 * fine;
+  float dirt = smoothstep(0.6, 0.72, fbm4(vOP.xz * 0.11 + 7.0)) * (1.0 - rocky) * smoothstep(1.4, 2.2, vOP.y);
+  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.4, 0.32, 0.22) * (0.75 + g2 * 0.5), dirt * 0.28);
+}`;
+terrainMat.onBeforeCompile = sh => natureShader(sh, GROUND_FRAG);
 
 // ---------------------------------------------------------------- nature assets
 // Trees are built procedurally: a tapered trunk with real branches, lumpy leaf clusters at the
@@ -891,48 +901,50 @@ const oreFleckGeo = (() => {
 // at a distance; the chunks around the player also get a dense meadow that fades out with range.
 // Wind, gusts and the player brushing through are all done in the vertex shader.
 const grassClump = (() => {
-  const rng = mulberry32(77), pos = [], col = [];
-  const BLADES = 5, SEGS = 3;
+  const rng = mulberry32(77), pos = [], nor = [], col = [], uvs = [], idx = [];
+  const BLADES = 11, SEGS = 4, up = new V3(0, 1, 0), S = new V3(), T = new V3(), N = new V3(), n = new V3();
   for (let b = 0; b < BLADES; b++) {
-    const ang = rng() * 6.28, ox = (rng() - 0.5) * 0.28, oz = (rng() - 0.5) * 0.28;
-    const h = 0.28 + rng() * 0.32, w = 0.035 + rng() * 0.025, lean = 0.2 + rng() * 0.45;
-    const dx = Math.cos(ang), dz = Math.sin(ang), fx = -dz * w, fz = dx * w;
-    const pt = i => {
-      const t = i / SEGS, off = lean * t * t * h;
-      return [ox + dx * off, t * h, oz + dz * off, 1 - t * 0.85, t];
-    };
-    for (let i = 0; i < SEGS; i++) {
-      const [ax, ay, az, aw, at] = pt(i), [bx, by, bz, bw, bt] = pt(i + 1);
-      const A = [ax - fx * aw, ay, az - fz * aw], B = [ax + fx * aw, ay, az + fz * aw];
-      if (i === SEGS - 1) {
-        pos.push(...A, ...B, bx, by, bz);
-        col.push(at, at, bt);
-      } else {
-        const C = [bx - fx * bw, by, bz - fz * bw], D = [bx + fx * bw, by, bz + fz * bw];
-        pos.push(...A, ...B, ...D, ...A, ...D, ...C);
-        col.push(at, at, bt, at, bt, bt);
+    const ang = rng() * 6.28, ox = (rng() - 0.5) * 0.4, oz = (rng() - 0.5) * 0.4;
+    const h = 0.24 + rng() * 0.38, w = 0.022 + rng() * 0.016, lean = 0.25 + rng() * 0.5;
+    const dx = Math.cos(ang), dz = Math.sin(ang), bright = 0.85 + rng() * 0.3, dry = rng() < 0.25 ? 0.4 + rng() * 0.6 : 0, base = pos.length / 3;
+    S.set(-dz, 0, dx);
+    for (let i = 0; i <= SEGS; i++) {
+      const t = i / SEGS, off = lean * t * t * h, y = t * h * (1 - 0.22 * lean * t), cx = ox + dx * off, cz = oz + dz * off;
+      const ww = w * (1 - Math.pow(t, 1.7));
+      T.set(dx * 2 * lean * t, 1, dz * 2 * lean * t).normalize();
+      N.crossVectors(S, T).normalize();
+      if (N.y < 0) N.negate();
+      const f = (0.3 + 0.7 * Math.pow(t, 0.8)) * bright, k = dry * t * t;
+      const rgb = [f * (1 + 0.25 * k), f * (1 + 0.12 * k), f * (1 - 0.38 * k)];
+      // a slight V-fold down the middle, so each blade catches the light on one side
+      const verts = [[-1, 0, -0.6], [0, 0.35, 0], [1, 0, 0.6]];
+      for (const [side, fold, tilt] of verts) {
+        pos.push(cx + S.x * ww * side + N.x * ww * fold, y + N.y * ww * fold, cz + S.z * ww * side + N.z * ww * fold);
+        n.copy(N).addScaledVector(S, tilt).addScaledVector(up, 0.55).normalize();
+        nor.push(n.x, n.y, n.z); col.push(...rgb); uvs.push((side + 1) / 2, t);
       }
+    }
+    for (let i = 0; i < SEGS; i++) {
+      const a = base + i * 3, c = a + 3;
+      idx.push(a, a + 1, c, a + 1, c + 1, c, a + 1, a + 2, c + 1, a + 2, c + 2, c + 1);
     }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  const n = pos.length / 3, nor = new Float32Array(n * 3), c = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    nor[i * 3 + 1] = 1;
-    const f = 0.42 + col[i] * 0.75;
-    c[i * 3] = c[i * 3 + 1] = c[i * 3 + 2] = f;
-  }
-  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx);
   return g;
 })();
+const grassSun = { value: new THREE.Color() };
 const grassPlayer = { value: new V3() };
 function grassMaterial(fadeStart, fadeEnd) {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   m.onBeforeCompile = sh => {
     sh.uniforms.uWind = wind;
     sh.uniforms.uPlayer = grassPlayer;
-    sh.vertexShader = 'uniform float uWind;\nuniform vec3 uPlayer;\n' + sh.vertexShader.replace('#include <project_vertex>', `
+    sh.vertexShader = 'uniform float uWind;\nuniform vec3 uPlayer;\nvarying vec2 vGUv;\nvarying vec3 vGWP;\n' + sh.vertexShader.replace('#include <project_vertex>', `
       vec4 mvPosition = vec4(transformed, 1.0);
       float baseY = 0.0;
       #ifdef USE_INSTANCING
@@ -954,10 +966,18 @@ function grassMaterial(fadeStart, fadeEnd) {
       float fade = 1.0 - smoothstep(${fadeStart.toFixed(1)}, ${fadeEnd.toFixed(1)}, distance(wp.xz, cameraPosition.xz));
       wp.y = baseY + (wp.y - baseY) * fade;
       mvPosition = viewMatrix * wp;
-      gl_Position = projectionMatrix * mvPosition;`);
+      gl_Position = projectionMatrix * mvPosition;
+      vGUv = uv; vGWP = wp.xyz;`);
     // light both sides of a blade the same way (as if it faced up), so back faces don't go black
     sh.fragmentShader = 'uniform float uSnow;\n' + sh.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n normal = normalize(vNormal);\n diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9, 0.93, 0.98), uSnow * 0.8);');
     sh.uniforms.uSnow = snowU;
+    sh.uniforms.uSunDir = { value: sunDir }; sh.uniforms.uSunCol = grassSun;
+    sh.fragmentShader = 'uniform vec3 uSunDir;\nuniform vec3 uSunCol;\nvarying vec2 vGUv;\nvarying vec3 vGWP;\nfloat gHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n' + sh.fragmentShader
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        diffuseColor.rgb *= 0.84 + 0.2 * (1.0 - abs(vGUv.x - 0.5) * 2.0) + (gHash(floor(vec2(vGUv.x * 5.0 + vGWP.x * 7.0, vGUv.y * 14.0 + vGWP.z * 5.0))) - 0.5) * 0.1;`)
+      .replace('#include <opaque_fragment>', `float gBack = pow(max(dot(normalize(vGWP - cameraPosition), uSunDir), 0.0), 3.0) * vGUv.y;
+        outgoingLight += diffuseColor.rgb * uSunCol * gBack;
+        #include <opaque_fragment>`);
     sh.vertexShader = 'uniform float uSnow;\n' + sh.vertexShader.replace('wp.y = baseY + (wp.y - baseY) * fade;', 'wp.y = baseY + (wp.y - baseY) * fade * (1.0 - uSnow * 0.55);');
   };
   m.customProgramCacheKey = () => 'grass' + fadeStart;
@@ -1091,7 +1111,14 @@ function buildChunk(cx, cz) {
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   geo.setIndex(terrainIndexFor(cx, cz));
-  geo.computeVertexNormals(); geo.computeBoundingSphere(); geo.computeBoundingBox();
+  // normals from the height field itself, so neighbouring chunks shade seamlessly
+  const nrm = new Float32Array(N * N * 3);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const gx = (Hg(i - 1, j) - Hg(i + 1, j)) / (2 * STEP), gz = (Hg(i, j - 1) - Hg(i, j + 1)) / (2 * STEP), l = Math.hypot(gx, 1, gz), v = (j * N + i) * 3;
+    nrm[v] = gx / l; nrm[v + 1] = 1 / l; nrm[v + 2] = gz / l;
+  }
+  geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  geo.computeBoundingSphere(); geo.computeBoundingBox();
   const terrain = new THREE.Mesh(geo, terrainMat);
   terrain.receiveShadow = terrain.castShadow = true; terrain.userData.kind = 'terrain';
 
@@ -4625,6 +4652,7 @@ function updateEnv(dt) {
   water.position.set(Math.round(P.pos.x / 10) * 10, WATER + Math.sin(envT * 0.8) * 0.03, Math.round(P.pos.z / 10) * 10);
 
   const flick = 0.85 + Math.sin(envT * 13) * 0.08 + Math.sin(envT * 7.3) * 0.07;
+  grassSun.value.copy(sun.color).multiplyScalar(sunUp ? sun.intensity * 0.4 : 0);
   glowMats.lamp.emissiveIntensity = 0.5 + night * 2.6;
   glowMats.window.emissiveIntensity = night * 1.5;
   glowMats.stained.color.setScalar(0.55 + night * 1.6);
