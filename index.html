@@ -158,7 +158,7 @@
 <div id="menu" class="overlay"><div class="card panel">
   <h1>🌿 Cosy Vale</h1>
   <p class="sub">Wander an endless valley, gather what you need, and build a little home.</p>
-  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="creativeBtn" class="ghost">🌿 Creative: off</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
+  <div class="btns"><button id="play" disabled>Growing the valley…</button><button id="newWorld" class="ghost">New world</button><button id="clockBtn" class="ghost">🕰️ Clock: real time</button><button id="weatherBtn" class="ghost">🌦️ Weather: changing</button><button id="creativeBtn" class="ghost">🌿 Creative: off</button><button id="vrBtn" class="hidden">🥽 Play in VR</button></div>
   <div class="controls">
     <kbd>WASD</kbd><span>Walk</span><kbd>Mouse</kbd><span>Look around</span>
     <kbd>Shift</kbd><span>Run</span><kbd>Space</kbd><span>Jump / swim up</span>
@@ -385,9 +385,23 @@ const skyMat = new THREE.ShaderMaterial({
   uniforms: {
     top: { value: new THREE.Color() }, hor: { value: new THREE.Color() },
     sunDir: { value: new V3() }, sunCol: { value: new THREE.Color() }, moonVis: { value: 0 }, moonDir: { value: new V3() }, moonPhase: { value: MOON_PHASE },
+    camP: { value: new V3() }, cloudOff: { value: new THREE.Vector2() }, cover: { value: 0.3 }, lightDir: { value: new V3(0, 1, 0) },
+    cLit: { value: new THREE.Color() }, cShade: { value: new THREE.Color() }, flash: { value: 0 }, rainbow: { value: 0 },
   },
+  defines: { OCT: 5 },
   vertexShader: `varying vec3 vDir; void main(){ vDir = position; vec4 p = projectionMatrix * modelViewMatrix * vec4(position,1.0); gl_Position = p.xyww; }`,
-  fragmentShader: `uniform vec3 top, hor, sunCol, sunDir, moonDir; uniform float moonVis, moonPhase; varying vec3 vDir;
+  fragmentShader: `uniform vec3 top, hor, sunCol, sunDir, moonDir, camP, lightDir, cLit, cShade; uniform vec2 cloudOff; uniform float moonVis, moonPhase, cover, flash, rainbow; varying vec3 vDir;
+    float h21(vec2 p) { vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+    float vn(vec2 p) { vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(h21(i), h21(i + vec2(1.0, 0.0)), u.x), mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), u.x), u.y); }
+    float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < OCT; i++) { s += a * vn(p); p = mat2(1.6, 1.2, -1.2, 1.6) * p + 3.1; a *= 0.5; } return s / (1.0 - pow(0.5, float(OCT))); }
+    // billowy cumulus: a broad shape, eaten away at the edges by finer detail
+    float dens(vec2 p) {
+      float base = fbm(p * 0.0019);
+      float det = fbm(p * 0.0078 + 11.7);
+      float th = mix(0.74, 0.22, cover);
+      return smoothstep(th, th + 0.13, base - (1.0 - det) * 0.2 + 0.08);
+    }
     void main(){ vec3 d = normalize(vDir);
       vec3 c = mix(hor, top, pow(max(d.y, 0.0), 0.55));
       if (d.y < 0.0) c = mix(hor, hor * 0.85, min(-d.y * 4.0, 1.0));
@@ -403,6 +417,31 @@ const skyMat = new THREE.ShaderMaterial({
           float k = cos(6.2831853 * moonPhase) * sqrt(max(0.0, 1.0 - my * my));
           float lit = moonPhase < 0.5 ? step(k, mx) : step(mx, -k);
           c = mix(c, vec3(0.85, 0.88, 0.95) * (0.1 + 2.4 * lit), (1.0 - smoothstep(0.8, 1.0, rr)) * moonVis);
+        }
+      }
+      if (rainbow > 0.001 && d.y > -0.02) {
+        float x = (acos(clamp(dot(d, -sunDir), -1.0, 1.0)) - 0.70) / 0.048;
+        if (x > 0.0 && x < 1.0) {
+          vec3 rb = clamp(abs(mod((1.0 - x) * 4.6 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+          c += rb * rainbow * 0.5 * sin(x * 3.14159) * smoothstep(-0.02, 0.12, d.y);
+        }
+      }
+      c += vec3(0.55, 0.6, 0.75) * flash * 0.5;
+      if (d.y > 0.0 && cover > 0.01) {
+        float t = (700.0 - camP.y) / max(d.y, 0.035);
+        vec2 p = camP.xz + d.xz * t + cloudOff;
+        float den = dens(p);
+        if (den > 0.002) {
+          // how much cloud lies between this spot and the sun (or moon): thick parts get grey undersides
+          vec2 ld = lightDir.xz / max(lightDir.y, 0.25);
+          float occ = dens(p + ld * 70.0) * 0.6 + dens(p + ld * 160.0) * 0.4;
+          float lit = exp(-occ * 2.3) * (0.55 + 0.45 * (1.0 - den));
+          vec3 cc = mix(cShade, cLit, lit);
+          float sv = pow(max(dot(d, lightDir), 0.0), 7.0);
+          cc += sunCol * sv * (1.0 - den) * 0.9;
+          cc += vec3(0.75, 0.8, 0.95) * flash * (0.5 + 0.8 * den);
+          cc = mix(hor, cc, 0.35 + 0.65 * smoothstep(0.0, 0.3, d.y));
+          c = mix(c, cc, den * smoothstep(0.0, 0.1, d.y));
         }
       }
       gl_FragColor = vec4(c, 1.0);
@@ -731,7 +770,9 @@ function grassMaterial(fadeStart, fadeEnd) {
       mvPosition = viewMatrix * wp;
       gl_Position = projectionMatrix * mvPosition;`);
     // light both sides of a blade the same way (as if it faced up), so back faces don't go black
-    sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n normal = normalize(vNormal);');
+    sh.fragmentShader = 'uniform float uSnow;\n' + sh.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n normal = normalize(vNormal);\n diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9, 0.93, 0.98), uSnow * 0.8);');
+    sh.uniforms.uSnow = snowU;
+    sh.vertexShader = 'uniform float uSnow;\n' + sh.vertexShader.replace('wp.y = baseY + (wp.y - baseY) * fade;', 'wp.y = baseY + (wp.y - baseY) * fade * (1.0 - uSnow * 0.55);');
   };
   m.customProgramCacheKey = () => 'grass' + fadeStart;
   return m;
@@ -1744,16 +1785,202 @@ water.receiveShadow = true;
 water.raycast = () => {};
 scene.add(water);
 
-const CLOUD_N = 28;
-const cloudMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, fog: false, transparent: true, opacity: 0.93, emissive: 0x9aa3b0 });
-const cloudMesh = new THREE.InstancedMesh(mergeGeometries([
-  B(16, 4, 10, 0, 0, 0, 0xffffff), B(10, 4, 8, 6, 1.5, 2, 0xf7f7f7), B(11, 5, 8, -5, 1.8, -1, 0xfafafa), B(7, 3, 6, 1, 3.5, 0, 0xffffff),
-]), cloudMat, CLOUD_N);
-cloudMesh.frustumCulled = false; cloudMesh.raycast = () => {};
-scene.add(cloudMesh);
-const clouds = [];
-for (let i = 0; i < CLOUD_N; i++) clouds.push({ x: (Math.random() - 0.5) * 700, z: (Math.random() - 0.5) * 700, y: 95 + Math.random() * 30, s: 0.8 + Math.random() * 1.2, r: Math.random() * 6.28 });
+// ---------------------------------------------------------------- weather
+// The weather drifts from one state to the next every few minutes, weighted by the real season. Each
+// state is a set of targets (cloud cover, darkness, rain, snow, fog, wind) that the sky eases towards, so
+// a sunny afternoon clouds over, darkens, and only then starts to rain.
+const WEATHERS = {
+  clear: { icon: '☀️', night: '🌙', name: 'Clear', cover: 0.1, dark: 0, rain: 0, snow: 0, fog: 0, wind: 0.15 },
+  fair: { icon: '🌤️', name: 'Fair', cover: 0.36, dark: 0, rain: 0, snow: 0, fog: 0, wind: 0.3 },
+  cloudy: { icon: '⛅', name: 'Cloudy', cover: 0.6, dark: 0.12, rain: 0, snow: 0, fog: 0.05, wind: 0.45 },
+  overcast: { icon: '☁️', name: 'Overcast', cover: 0.88, dark: 0.4, rain: 0, snow: 0, fog: 0.2, wind: 0.5 },
+  rain: { icon: '🌧️', name: 'Rain', cover: 0.96, dark: 0.6, rain: 1, snow: 0, fog: 0.4, wind: 0.65, msg: "🌧️ It's starting to rain" },
+  storm: { icon: '⛈️', name: 'Thunderstorm', cover: 1, dark: 0.85, rain: 1, snow: 0, fog: 0.5, wind: 1, storm: true, msg: '⛈️ A storm is rolling in' },
+  fog: { icon: '🌫️', name: 'Fog', cover: 0.55, dark: 0.18, rain: 0, snow: 0, fog: 1, wind: 0.05, msg: '🌫️ A thick fog drifts in' },
+  snow: { icon: '🌨️', name: 'Snow', cover: 0.93, dark: 0.3, rain: 0, snow: 1, fog: 0.45, wind: 0.3, msg: '🌨️ Snow is falling' },
+};
+const WEATHER_ODDS = [
+  { clear: 20, fair: 30, cloudy: 20, overcast: 10, rain: 15, storm: 3, fog: 2 },
+  { clear: 35, fair: 30, cloudy: 12, overcast: 5, rain: 8, storm: 8, fog: 2 },
+  { clear: 12, fair: 20, cloudy: 20, overcast: 15, rain: 18, storm: 5, fog: 10 },
+  { clear: 15, fair: 15, cloudy: 15, overcast: 20, rain: 5, fog: 10, snow: 20 },
+][SEASON];
+const WEATHER_MODES = ['auto', 'clear', 'cloudy', 'rain', 'storm', 'snow', 'fog'];
+let weatherMode = save?.weather?.mode || 'auto';
+const W = { state: save?.weather?.state || 'fair', timer: save?.weather?.timer ?? 240, cover: 0.3, dark: 0, rain: 0, snow: 0, fog: 0, wind: 0.3,
+  wet: 0, snowCover: save?.weather?.snowCover || 0, flash: 0, flashT: 8, rainbow: 0, sheltered: false, shelterT: 0, cloudOff: new THREE.Vector2(), windDir: Math.random() * 6.28 };
+if (!WEATHERS[W.state]) W.state = 'fair';
+Object.assign(W, (({ cover, dark, rain, snow, fog, wind }) => ({ cover, dark, rain, snow, fog, wind }))(WEATHERS[weatherMode === 'auto' ? W.state : weatherMode]));
+const snowU = { value: W.snowCover };
+function pickWeather() {
+  const odds = Object.entries(WEATHER_ODDS);
+  let r = Math.random() * odds.reduce((s, [, v]) => s + v, 0);
+  for (const [k, v] of odds) if ((r -= v) < 0) return k;
+  return 'fair';
+}
+function setWeatherState(k, quiet) {
+  const prev = WEATHERS[W.state], next = WEATHERS[k], same = k === W.state;
+  W.state = k;
+  if (quiet || same) return;
+  if (next.msg) toast(next.msg);
+  else if ((prev.rain || prev.snow) && !next.rain && !next.snow) toast(prev.snow ? '🌤️ The snow has stopped' : '🌤️ The rain is easing off');
+}
+function cycleWeather() {
+  weatherMode = WEATHER_MODES[(WEATHER_MODES.indexOf(weatherMode) + 1) % WEATHER_MODES.length];
+  if (weatherMode !== 'auto') setWeatherState(weatherMode, true);
+  renderWeatherBtn(); dirty = true; sfx('ui');
+  toast(weatherMode === 'auto' ? '🌦️ Weather: changes by itself through the season' : `${WEATHERS[weatherMode].icon} Weather: always ${WEATHERS[weatherMode].name.toLowerCase()}`);
+}
+function renderWeatherBtn() { $('weatherBtn').textContent = weatherMode === 'auto' ? '🌦️ Weather: changing' : `${WEATHERS[weatherMode].icon} Weather: ${WEATHERS[weatherMode].name}`; }
+const weatherIcon = () => { const S = WEATHERS[W.state]; return night > 0.6 && S.night ? S.night : S.icon; };
 
+// ---- precipitation: rain streaks and snowflakes in a box that follows the camera
+const PRECIP_BOX = new V3(46, 28, 46);
+const precipU = { time: { value: 0 }, center: { value: new V3() }, box: { value: PRECIP_BOX }, wind: { value: new THREE.Vector2() }, amount: { value: 0 },
+  shelter: { value: 0 }, col: { value: new THREE.Color() }, proj: { value: 800 } };
+function precipGeo(n, verts) {
+  const seed = new Float32Array(n * verts * 3), tip = new Float32Array(n * verts);
+  for (let i = 0; i < n; i++) { const a = Math.random(), b = Math.random(), c = Math.random(); for (let k = 0; k < verts; k++) { seed.set([a, b, c], (i * verts + k) * 3); tip[i * verts + k] = k; } }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(seed.length), 3));
+  g.setAttribute('seed', new THREE.BufferAttribute(seed, 3));
+  g.setAttribute('tip', new THREE.BufferAttribute(tip, 1));
+  return g;
+}
+const PRECIP_VS = (snow) => `attribute vec3 seed; attribute float tip;
+  uniform float time, amount, shelter, proj; uniform vec3 center, box; uniform vec2 wind; varying float vA;
+  void main() {
+    float k = 0.8 + 0.4 * fract(seed.x * 13.7);
+    vec3 v = vec3(wind.x, ${snow ? '-1.3' : '-15.0'}, wind.y) * k;
+    vec3 p = seed * box + v * time;
+    ${snow ? 'p.x += sin(time * 0.9 + seed.y * 40.0) * 0.6; p.z += cos(time * 0.7 + seed.x * 40.0) * 0.6;' : ''}
+    vec3 lo = center - box * 0.5;
+    vec3 w = lo + mod(p - lo, box);
+    float keep = step(fract(seed.z * 7.31), amount);
+    float r = length(w.xz - center.xz);
+    if (shelter > 0.5 && r < 7.0) keep = 0.0;
+    ${snow ? '' : 'w -= normalize(v) * 0.9 * tip;'}
+    vA = keep * (1.0 - smoothstep(box.x * 0.34, box.x * 0.5, r));
+    vec4 mv = viewMatrix * vec4(w, 1.0);
+    gl_Position = keep > 0.5 ? projectionMatrix * mv : vec4(2.0, 2.0, 2.0, 1.0);
+    ${snow ? 'gl_PointSize = keep * proj * 0.1 / max(-mv.z, 0.5);' : ''}
+  }`;
+const rainMat = new THREE.ShaderMaterial({ uniforms: precipU, transparent: true, depthWrite: false, vertexShader: PRECIP_VS(false),
+  fragmentShader: 'uniform vec3 col; varying float vA; void main() { gl_FragColor = vec4(col, 0.42 * vA); }' });
+const snowMat = new THREE.ShaderMaterial({ uniforms: precipU, transparent: true, depthWrite: false, vertexShader: PRECIP_VS(true),
+  fragmentShader: 'uniform vec3 col; varying float vA; void main() { vec2 q = gl_PointCoord - 0.5; float d = dot(q, q); if (d > 0.25) discard; gl_FragColor = vec4(col * 1.25, vA * (1.0 - d * 3.0)); }' });
+const rain = new THREE.LineSegments(precipGeo(7000, 2), rainMat), snow = new THREE.Points(precipGeo(5000, 1), snowMat);
+for (const m of [rain, snow]) { m.frustumCulled = false; m.raycast = () => {}; m.renderOrder = 8; m.visible = false; scene.add(m); }
+
+// ---- lightning: a jagged bolt far off, a flash across the sky, then thunder
+const boltMat = new THREE.LineBasicMaterial({ color: 0xeef2ff, transparent: true, toneMapped: false, fog: false });
+const bolt = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(26 * 3), 3)), boltMat);
+bolt.frustumCulled = false; bolt.visible = false; bolt.raycast = () => {};
+scene.add(bolt);
+function strike() {
+  const ang = Math.random() * 6.28, dist = 120 + Math.random() * 260, x = P.pos.x + Math.cos(ang) * dist, z = P.pos.z + Math.sin(ang) * dist;
+  const gy = Math.max(heightAt(x, z), WATER), pos = bolt.geometry.attributes.position;
+  let bx = x, bz = z;
+  for (let i = 0; i < 26; i++) {
+    const t = i / 25;
+    pos.setXYZ(i, bx, gy + 260 * (1 - t), bz);
+    bx += (Math.random() - 0.5) * 14; bz += (Math.random() - 0.5) * 14;
+  }
+  pos.needsUpdate = true;
+  W.flash = 1; W.boltT = 0.25;
+  if (A.ctx && !A.muted) {
+    const t = A.ctx.currentTime + dist / 340, vol = 0.5 * (1.3 - dist / 400);
+    noiseHit(t, 0.5, vol, 900, 0.4, 'lowpass');
+    noiseHit(t + 0.15, 3.2, vol * 0.9, 140, 0.5, 'lowpass');
+    noiseHit(t + 0.9, 2.6, vol * 0.6, 90, 0.4, 'lowpass');
+  }
+}
+
+// ---- rain and wind you can hear
+const WA = { rain: null, wind: null };
+function weatherAudio() {
+  if (!A.ctx) return;
+  if (!WA.rain) {
+    const loop = (type, freq, q) => {
+      const s = A.ctx.createBufferSource(), f = A.ctx.createBiquadFilter(), g = A.ctx.createGain();
+      s.buffer = A.noise; s.loop = true; f.type = type; f.frequency.value = freq; f.Q.value = q; g.gain.value = 0;
+      s.connect(f); f.connect(g); g.connect(A.sfx); s.start();
+      return { f, g };
+    };
+    WA.rain = loop('bandpass', 2600, 0.5); WA.wind = loop('lowpass', 420, 0.8);
+  }
+  const t = A.ctx.currentTime, inside = 1 - caveF * 0.9;
+  WA.rain.g.gain.setTargetAtTime(W.rain * 0.16 * inside * (W.sheltered ? 0.7 : 1), t, 0.6);
+  WA.rain.f.frequency.setTargetAtTime(W.sheltered ? 900 : 2600, t, 0.4);
+  WA.wind.g.gain.setTargetAtTime(Math.max(0, W.wind - 0.25) * 0.14 * inside * (0.8 + Math.sin(envT * 0.4) * 0.2), t, 0.8);
+}
+
+let weatherSaveT = 0;
+function updateWeather(dt) {
+  if (weatherMode === 'auto') {
+    W.timer -= dt;
+    if (W.timer <= 0) { W.timer = 180 + Math.random() * 360; setWeatherState(pickWeather()); }
+  } else if (W.state !== weatherMode) setWeatherState(weatherMode, true);
+  const T = WEATHERS[W.state], k = 1 - Math.exp(-dt / 22), kr = 1 - Math.exp(-dt / 9);
+  W.cover += (T.cover - W.cover) * k; W.dark += (T.dark - W.dark) * k; W.fog += (T.fog - W.fog) * k; W.wind += (T.wind - W.wind) * k;
+  // rain and snow wait for the clouds to gather first
+  const ready = smooth(0.7, 0.92, W.cover);
+  W.rain += (T.rain * ready - W.rain) * kr; W.snow += (T.snow * ready - W.snow) * kr;
+  W.wet = clamp(W.wet + (W.rain > 0.2 ? dt / 40 : -dt / 240), 0, 1);
+  W.snowCover = clamp(W.snowCover + (W.snow > 0.3 ? dt / 150 : -dt / (SEASON === 3 ? 900 : 300)), 0, 1);
+  snowU.value = W.snowCover;
+  // a rainbow when the rain clears in the sun
+  const rbWant = W.wet > 0.25 && W.rain < 0.1 && W.cover < 0.75 && sunDir.y > 0.02 && sunDir.y < 0.62 ? 1 : 0;
+  if (rbWant && W.rainbow < 0.05 && dt) toast('🌈 Look — a rainbow!');
+  W.rainbow += (rbWant * smooth(0.25, 0.6, W.wet) - W.rainbow) * (1 - Math.exp(-dt / 6));
+  // thunderstorms
+  W.flash = Math.max(0, W.flash - dt * 4);
+  if (W.flash > 0.3 && W.flash < 0.4 && Math.random() < 0.3) W.flash = 0.8;
+  if (W.boltT > 0) { W.boltT -= dt; bolt.visible = W.boltT > 0; boltMat.opacity = clamp(W.boltT * 6, 0, 1); }
+  if (T.storm && W.rain > 0.6 && caveF < 0.5) { W.flashT -= dt; if (W.flashT <= 0) { W.flashT = 5 + Math.random() * 14; strike(); } }
+  // drifting cloud layer
+  W.windDir += dt * 0.004;
+  const ws = 3 + W.wind * 16;
+  W.cloudOff.x += Math.cos(W.windDir) * ws * dt; W.cloudOff.y += Math.sin(W.windDir) * ws * dt;
+  // is there a roof over your head?
+  if ((W.shelterT -= dt) <= 0) {
+    W.shelterT = 0.3;
+    queryBoxes(P.pos.x, P.pos.z, 0.5, _wb);
+    W.sheltered = caveF > 0.3 || _wb.some(b => b.minY > P.pos.y + 1.5 && b.minY < P.pos.y + 14 && P.pos.x > b.minX && P.pos.x < b.maxX && P.pos.z > b.minZ && P.pos.z < b.maxZ);
+  }
+  precipU.time.value += dt;
+  precipU.center.value.copy(camPos);
+  precipU.wind.value.set(Math.cos(W.windDir), Math.sin(W.windDir)).multiplyScalar(W.wind * 4.5);
+  precipU.shelter.value = W.sheltered ? 1 : 0;
+  precipU.proj.value = renderer.domElement.height / (2 * Math.tan(camera.fov * Math.PI / 360));
+  precipU.col.value.setRGB(0.62, 0.68, 0.78).multiplyScalar(0.25 + 0.75 * (1 - night) + W.flash);
+  const under = caveF > 0.6;
+  rain.visible = W.rain > 0.01 && !under; snow.visible = W.snow > 0.01 && !under;
+  precipU.amount.value = Math.max(W.rain, W.snow) * (T.storm ? 1 : 0.7);
+  if (snow.visible && !rain.visible) precipU.amount.value = W.snow * 0.8;
+  weatherAudio();
+  if ((weatherSaveT += dt) > 20) { weatherSaveT = 0; dirty = true; }
+}
+const _wb = [];
+// snow settles on the ground, on grass and leaves, and on roofs
+const SNOW_GLSL = (amt, gate) => `
+  { vec3 nW = normalize((vec4(normal, 0.0) * viewMatrix).xyz);
+    float sAmt = uSnow * ${amt} * smoothstep(0.35, 0.8, nW.y) ${gate};
+    diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.93, 0.95, 1.0), clamp(sAmt, 0.0, 1.0)); }`;
+function addSnow(mat, amt, gate = '', key) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    prev?.call(mat, sh, r);
+    sh.uniforms.uSnow = snowU;
+    sh.fragmentShader = 'uniform float uSnow;\n' + sh.fragmentShader.replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>' + SNOW_GLSL(amt, gate));
+  };
+  const pk = mat.customProgramCacheKey.bind(mat);
+  mat.customProgramCacheKey = () => pk() + '|snow' + key;
+}
+
+addSnow(terrainMat, '1.05', '', 't');
+addSnow(leafMat, '0.75', '', 'l');
+addSnow(matVC, '0.95', '* step(4.5, vSurf) * step(vSurf, 5.5)', 'v');
 // fireflies
 const FF = 80;
 const ffPos = new Float32Array(FF * 3);
@@ -3388,7 +3615,7 @@ function updateClock() {
   const S = SEASONS[SEASON];
   const date = clockMode === 'real' ? new Date().toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) : `Day ${dayNum}`;
   const deep = Math.round(undergroundDepth(camPos));
-  $('dayText').textContent = deep > 1 ? `⬇️ ${deep} m underground` : `${date} · ${S.icon} ${S.name}`;
+  $('dayText').textContent = deep > 1 ? `⬇️ ${deep} m underground` : `${date} · ${S.icon} ${S.name} · ${weatherIcon()} ${WEATHERS[W.state].name}`;
   $('clockText').title = MOON_NAME;
 }
 function renderClockBtn() { $('clockBtn').textContent = clockMode === 'real' ? '🕰️ Clock: real time' : '⏩ Clock: fast days'; }
@@ -3631,6 +3858,7 @@ function showMenu() { $('menu').classList.remove('hidden'); $('play').textConten
 canvas.addEventListener('click', () => { if (!active() && !catalogOpen && !craftOpen && !bagOpen && !mapOpen) lock(); });
 $('play').onclick = () => lock();
 $('clockBtn').onclick = toggleClock;
+$('weatherBtn').onclick = cycleWeather;
 $('creativeBtn').onclick = toggleCreative;
 let newWorldArmed = false;
 function resetNewWorldBtn() { newWorldArmed = false; $('newWorld').textContent = 'New world'; $('newWorld').classList.add('ghost'); }
@@ -4135,7 +4363,7 @@ const SKY = {
   nightTop: C(0x070d24), nightHor: C(0x1b2850), sunWarm: C(0xffb070), sunWhite: C(0xfff3dc), moon: C(0x9db4ff),
   hemiDay: C(0xd6ecff), hemiNight: C(0x4a5a90), groundDay: C(0x8a7a58), groundNight: C(0x1d1a24),
 };
-const sunDir = new V3(), moonDir = new V3(), _top = new THREE.Color(), _hor = new THREE.Color();
+const sunDir = new V3(), moonDir = new V3(), _top = new THREE.Color(), _hor = new THREE.Color(), _wc = new THREE.Color();
 let night = 0, envT = 0;
 function updateEnv(dt) {
   envT += dt;
@@ -4147,22 +4375,35 @@ function updateEnv(dt) {
   const dusk = smooth(0.42, 0.0, Math.abs(sunDir.y + 0.04));
   _top.copy(SKY.nightTop).lerp(SKY.dayTop, day).lerp(SKY.duskTop, dusk * 0.5);
   _hor.copy(SKY.nightHor).lerp(SKY.dayHor, day).lerp(SKY.duskHor, dusk * 0.75);
+  camera.getWorldPosition(camPos);
+  updateWeather(dt);
+  // heavy cloud turns the whole sky grey, darker in a storm
+  const ov = smooth(0.55, 1.0, W.cover), lightK = 0.12 + 0.88 * day;
+  _c.setRGB(0.66, 0.7, 0.75).lerp(_wc.setRGB(0.26, 0.28, 0.32), W.dark).multiplyScalar(lightK);
+  _top.lerp(_c, ov * 0.92); _hor.lerp(_wc.copy(_c).multiplyScalar(1.12), ov * 0.85);
+  _top.lerp(_wc.setRGB(0.78, 0.8, 0.84).multiplyScalar(lightK), W.fog * 0.5); _hor.lerp(_wc.setRGB(0.82, 0.84, 0.86).multiplyScalar(lightK), W.fog * 0.75);
   skyMat.uniforms.top.value.copy(_top);
   skyMat.uniforms.hor.value.copy(_hor);
   skyMat.uniforms.sunDir.value.copy(sunDir);
   skyMat.uniforms.sunCol.value.copy(SKY.sunWarm).lerp(SKY.sunWhite, smooth(0, 0.4, sunDir.y)).multiplyScalar(smooth(-0.1, 0.02, sunDir.y));
   skyMat.uniforms.moonDir.value.copy(moonDir);
   skyMat.uniforms.moonVis.value = smooth(-0.02, 0.08, moonDir.y) * (0.3 + 0.7 * night);
-  stars.material.opacity = smooth(0.35, 0.9, night) * 0.9;
+  stars.material.opacity = smooth(0.35, 0.9, night) * 0.9 * (1 - smooth(0.4, 0.9, W.cover));
+  const U = skyMat.uniforms, moonLit = sunDir.y < -0.02 && moonDir.y > 0;
+  U.camP.value.copy(camPos); U.cloudOff.value.copy(W.cloudOff); U.cover.value = W.cover; U.flash.value = W.flash; U.rainbow.value = W.rainbow;
+  U.lightDir.value.copy(moonLit ? moonDir : sunDir);
+  U.cLit.value.setRGB(1.05, 1.03, 1.0).lerp(_wc.setRGB(1.05, 0.6, 0.4), dusk * 0.9).multiplyScalar(Math.max(0.06 + 0.94 * day, dusk * 0.95)).lerp(_wc.setRGB(0.2, 0.23, 0.3), moonLit ? 0.6 * MOON_ILLUM : 0);
+  U.cShade.value.copy(_hor).lerp(_top, 0.35).multiplyScalar(0.72).lerp(_wc.setRGB(0.42, 0.3, 0.42), dusk * 0.45);
+  U.cLit.value.multiplyScalar(1 - 0.55 * W.dark); U.cShade.value.multiplyScalar(1 - 0.5 * W.dark);
 
-  camera.getWorldPosition(camPos);
   caveF += (smooth(1.0, 5.0, undergroundDepth(camPos)) - caveF) * Math.min(1, dt * 2 + (dt ? 0 : 1));
   const under = camPos.y < WATER - 0.05 && caveF < 0.1;
   $('underwater').classList.toggle('hidden', !under);
   if (under) { scene.fog.color.set(0x2d6f8f); scene.fog.near = 1; scene.fog.far = 28; }
   else {
     scene.fog.color.copy(_hor).lerp(_c.setHex(0x120e0a), caveF);
-    scene.fog.near = fogNear + (3 - fogNear) * caveF; scene.fog.far = fogFar + (34 - fogFar) * caveF;
+    const wf = 1 - W.fog * 0.82 - W.rain * 0.25 - W.snow * 0.3;
+    scene.fog.near = fogNear * Math.max(0.08, wf) + (3 - fogNear) * caveF; scene.fog.far = fogFar * Math.max(0.22, wf + 0.12) + (34 - fogFar) * caveF;
   }
   water.visible = caveF < 0.5;
   caveLight.position.copy(camPos); caveLight.intensity = caveF * 5;
@@ -4176,9 +4417,10 @@ function updateEnv(dt) {
   sun.position.set(px + ldir.x * 100, P.pos.y + ldir.y * 100, pz + ldir.z * 100);
   hemi.color.copy(SKY.hemiNight).lerp(SKY.hemiDay, day);
   hemi.groundColor.copy(SKY.groundNight).lerp(SKY.groundDay, day);
-  hemi.intensity = (0.42 + day * 0.33) * (1 - 0.8 * caveF);
-  scene.environmentIntensity = (0.06 + day * 0.3) * (1 - 0.85 * caveF);
-  sun.intensity *= 1 - 0.85 * caveF;
+  hemi.intensity = (0.42 + day * 0.33) * (1 - 0.8 * caveF) * (1 + ov * 0.15 - W.dark * 0.55) + W.flash * 2.5 * (1 - caveF);
+  scene.environmentIntensity = (0.06 + day * 0.3) * (1 - 0.85 * caveF) * (1 - W.dark * 0.4);
+  sun.intensity *= (1 - 0.85 * caveF) * (1 - 0.82 * ov * (0.55 + 0.45 * W.dark)) * (1 - 0.5 * W.fog);
+  terrainMat.roughness = 1 - 0.4 * W.wet;
 
   sky.position.copy(camPos);
   stars.position.copy(camPos);
@@ -4191,19 +4433,8 @@ function updateEnv(dt) {
   glowMats.fire.emissiveIntensity = 2.2 * flick;
   bloom.strength = 0.18 + night * 0.5;
 
-  cloudMat.color.copy(SKY.nightHor).lerp(new THREE.Color(0xffffff), day).lerp(SKY.duskHor, dusk * 0.35);
-  cloudMat.emissive.copy(cloudMat.color).multiplyScalar(0.45);
-  for (let i = 0; i < CLOUD_N; i++) {
-    const c = clouds[i];
-    c.x += dt * 2.2;
-    if (c.x - P.pos.x > 350) c.x -= 700; else if (c.x - P.pos.x < -350) c.x += 700;
-    if (c.z - P.pos.z > 350) c.z -= 700; else if (c.z - P.pos.z < -350) c.z += 700;
-    _q.setFromAxisAngle(UP, c.r); _p.set(c.x, c.y, c.z); _s.set(c.s, c.s * 0.8, c.s);
-    cloudMesh.setMatrixAt(i, _m.compose(_p, _q, _s));
-  }
-  cloudMesh.instanceMatrix.needsUpdate = true;
 
-  ffMat.opacity = smooth(0.5, 0.9, night) * 0.95;
+  ffMat.opacity = smooth(0.5, 0.9, night) * 0.95 * (1 - Math.max(W.rain, W.snow));
   if (ffMat.opacity > 0.01) {
     for (let i = 0; i < FF; i++) {
       const f = ffs[i];
@@ -4960,11 +5191,12 @@ function drawUI() {
       [P.fly ? '🕊️ Flying: ON' : '🚶 Flying: OFF', toggleFly, P.fly],
       [A.muted ? '🔇 Sound: OFF' : '🔊 Sound: ON', toggleMute, !A.muted],
       [clockMode === 'real' ? '🕰️ Clock: real time' : '⏩ Clock: fast days', toggleClock, clockMode === 'real'],
+      [weatherMode === 'auto' ? '🌦️ Weather: changing' : `${WEATHERS[weatherMode].icon} Weather: ${WEATHERS[weatherMode].name}`, cycleWeather, false],
       [`🥽 Graphics: ${['high', 'medium', 'low'][vrLevel]} ▶`, () => { vrLevel = (vrLevel + 1) % VR_LEVELS.length; slowT = 0; applyQuality(true); }, false],
       ['🔄 Rotate held piece', () => { rotIdx++; sfx('ui'); }, false],
       ['🎨 Change colour', () => cycleColor(), false],
     ];
-    opts.forEach(([label, fn, on], i) => btn(24 + (i % 2) * 494, 100 + Math.floor(i / 2) * 110, 482, 90, label, fn, { on, size: 28 }));
+    opts.forEach(([label, fn, on], i) => btn(24 + (i % 2) * 494, 96 + Math.floor(i / 2) * 92, 482, 80, label, fn, { on, size: 26 }));
     btn(24, 560, 976, 80, '🚪 Leave VR', () => renderer.xr.getSession()?.end(), { size: 28 });
     c.fillStyle = '#8a7766'; c.font = '700 18px Nunito, sans-serif'; c.fillText('Your world saves automatically. Point with the right controller and pull the trigger.', 24, 690);
   }
@@ -5120,6 +5352,8 @@ function applyQuality(vr) {
   grassDensity = vr ? L.grass : DESKTOP_Q.grass;
   [fogNear, fogFar] = vr ? L.fog : DESKTOP_Q.fog;
   const size = vr ? 1024 : DESKTOP_Q.shadow;
+  const oct = vr ? (vrLevel ? 3 : 4) : 5;
+  if (skyMat.defines.OCT !== oct) { skyMat.defines.OCT = oct; skyMat.needsUpdate = true; }
   if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.set(size, size); sun.shadow.map?.dispose(); sun.shadow.map = null; }
   for (const ch of chunks.values()) ch.grassDirty = true;
 }
@@ -5503,7 +5737,7 @@ function saveGame() {
     seed: SEED, inv, owned: [...owned], hours, dayNum, clockMode, slots, varSel, snapOn, creative, fly: P.fly, muted: A.muted, harvested,
     player: { x: P.pos.x, y: P.pos.y, z: P.pos.z, yaw: P.yaw, pitch: P.pitch },
     pieces: pieces.filter(p => !p.gen).map(p => [p.id, p.x, p.y, p.z, +p.rot.toFixed(4), p.v]),
-    dug: [...dug].filter(k => !natural.has(k)), filledNat: [...filledNat], looted: [...looted], found: [...found], waypoint,
+    dug: [...dug].filter(k => !natural.has(k)), filledNat: [...filledNat], looted: [...looted], found: [...found], waypoint, weather: { mode: weatherMode, state: W.state, timer: Math.round(W.timer), snowCover: +W.snowCover.toFixed(3) },
     creatures: animals.filter(a => a.tame).map(a => [a.type, +a.home.x.toFixed(2), +a.home.z.toFixed(2), a.v, a.name || '']),
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { console.warn('save failed', e); }
@@ -5520,7 +5754,7 @@ function frame(now) {
   if (clockMode === 'real') hours = realHours();
   if (running) {
     if (clockMode === 'fast') hours += dt * 24 / DAY_SECONDS;
-    wind.value += dt;
+    wind.value += dt * (0.8 + W.wind * 1.4);
     for (const sm of spinners) sm.rotation.z += dt * 0.7;
     grassPlayer.value.copy(P.pos);
     if (clockMode === 'fast' && hours >= 24) { hours -= 24; dayNum++; }
@@ -5574,14 +5808,14 @@ function boot() {
   }
   const pcx = Math.floor(P.pos.x / CHUNK), pcz = Math.floor(P.pos.z / CHUNK);
   for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) buildChunk(pcx + dx, pcz + dz);
-  updateInv(); renderHotbar(); renderClockBtn(); renderCreativeBtn(); updateEnv(0); updateClock();
+  updateInv(); renderHotbar(); renderClockBtn(); renderWeatherBtn(); renderCreativeBtn(); updateEnv(0); updateClock();
   updatePlayer(0);
   $('play').disabled = false;
   $('play').textContent = save ? 'Continue' : 'Begin';
   renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { openMap, closeMap, drawMap, mapTiles, mapView, setWaypoint, get waypoint() { return waypoint; }, natural, ramps, genDeco, areas, found, openChest, cracks, dunBlocks, digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { W, WEATHERS, cycleWeather, setWeatherState, get weatherMode() { return weatherMode; }, set weatherMode(v) { weatherMode = v; }, skyMat, openMap, closeMap, drawMap, mapTiles, mapView, setWaypoint, get waypoint() { return waypoint; }, natural, ramps, genDeco, areas, found, openChest, cracks, dunBlocks, digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
