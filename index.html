@@ -27,6 +27,15 @@
   .recipe button { padding: 7px 14px; font-size: 14px; }
   .recipe button:disabled { cursor: not-allowed; }
   #inv b { display: inline-block; min-width: 22px; }
+  #mapHud { position: fixed; top: 84px; right: 14px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; }
+  #minimap { width: 176px; height: 176px; border-radius: 50%; box-shadow: 0 4px 14px rgba(60,40,20,.25); }
+  #coords { padding: 5px 12px; font-size: 13px; font-weight: 800; white-space: pre; text-align: right; line-height: 1.5; }
+  #mapView .card { width: min(1100px, 100%); height: min(820px, 94vh); display: flex; flex-direction: column; overflow: hidden; padding: 22px 26px; }
+  #mapView h2 { margin: 0; font-size: 26px; font-weight: 900; }
+  .mapbtns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mapbtns button { padding: 7px 12px; font-size: 14px; }
+  #mapCanvas { flex: 1; min-height: 0; width: 100%; border-radius: 14px; cursor: crosshair; background: #e9dcc4; touch-action: none; }
+  #mapView .sub { margin: 6px 0 10px; font-size: 14px; font-weight: 700; }
   #clock { position: fixed; top: 14px; right: 14px; padding: 8px 16px; text-align: right; font-weight: 800; font-size: 18px; }
   #clock small { display: block; font-size: 12px; color: var(--muted); font-weight: 700; }
   #crosshair { position: fixed; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: rgba(255,255,255,.95); box-shadow: 0 0 0 2px rgba(60,40,20,.3); pointer-events: none; }
@@ -112,8 +121,9 @@
 <div id="inv" class="panel"></div>
 <div id="clock" class="panel"><span id="clockIcon">☀️</span> <span id="clockText">08:00</span><small id="dayText">Day 1</small></div>
 <div id="toast" class="panel"></div>
+<div id="mapHud"><canvas id="minimap" width="176" height="176"></canvas><div id="coords" class="panel"></div></div>
 <div id="hotbarWrap"><div id="selname" class="panel"></div><div id="hotbar"></div></div>
-<div id="keys" class="panel"><b>Tab</b> catalog · <b>R</b> rotate · <b>C</b> colour · <b>G</b> snap · <b>F</b> fly · <b>E</b> use · <b>Q</b> hands · <b>I</b> backpack · <b>M</b> mute</div>
+<div id="keys" class="panel"><b>Tab</b> catalog · <b>R</b> rotate · <b>C</b> colour · <b>G</b> snap · <b>F</b> fly · <b>E</b> use · <b>Q</b> hands · <b>I</b> backpack · <b>M</b> map · <b>V</b> mute</div>
 <div id="fade"></div>
 
 <div id="catalog" class="overlay hidden"><div class="card panel">
@@ -138,6 +148,13 @@
   <p class="small">Click a tool to put it in your selected hotbar slot · I, Tab or Esc to close</p>
 </div></div>
 
+<div id="mapView" class="overlay hidden"><div class="card panel">
+  <div class="cathead"><h2>🗺️ Map of the valley</h2><div class="mapbtns"><button id="mapZoomIn" class="ghost">➕</button><button id="mapZoomOut" class="ghost">➖</button><button id="mapMe" class="ghost">🎯 Find me</button><button id="mapMark" class="ghost">📍 Mark here</button><button id="mapClear" class="ghost">✖ Clear</button></div></div>
+  <div class="sub" id="mapSub"></div>
+  <canvas id="mapCanvas"></canvas>
+  <p class="small">Drag to move · wheel to zoom · click to drop a marker (click it again to remove) · 🟫 your builds · 🐾 your creatures · places you've discovered show up as you find them · M, Tab or Esc to close</p>
+</div></div>
+
 <div id="menu" class="overlay"><div class="card panel">
   <h1>🌿 Cosy Vale</h1>
   <p class="sub">Wander an endless valley, gather what you need, and build a little home.</p>
@@ -151,7 +168,7 @@
     <kbd>Middle click</kbd><span>Copy the piece you look at</span><kbd>E</kbd><span>Sleep in a bed at night</span>
     <kbd>G</kbd><span>Snap to parts / free place</span><kbd>F</kbd><span>Toggle flying</span>
     <kbd>Q</kbd><span>Empty hands (to interact)</span><kbd>I</kbd><span>Backpack</span>
-    <kbd>M</kbd><span>Mute music</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
+    <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
   </div>
   <p class="small">Your world saves automatically in this browser. Trees and flowers regrow after a while.</p>
 </div></div>
@@ -3608,10 +3625,10 @@ function exitToMenu() {
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
   if (locked) { freeMode = false; document.body.classList.remove('free'); $('menu').classList.add('hidden'); }
-  else { mouseL = false; for (const k in keys) keys[k] = false; if (!catalogOpen && !craftOpen && !bagOpen && !freeMode) showMenu(); }
+  else { mouseL = false; for (const k in keys) keys[k] = false; if (!catalogOpen && !craftOpen && !bagOpen && !mapOpen && !freeMode) showMenu(); }
 });
 function showMenu() { $('menu').classList.remove('hidden'); $('play').textContent = 'Resume'; resetNewWorldBtn(); saveGame(); }
-canvas.addEventListener('click', () => { if (!active() && !catalogOpen && !craftOpen && !bagOpen) lock(); });
+canvas.addEventListener('click', () => { if (!active() && !catalogOpen && !craftOpen && !bagOpen && !mapOpen) lock(); });
 $('play').onclick = () => lock();
 $('clockBtn').onclick = toggleClock;
 $('creativeBtn').onclick = toggleCreative;
@@ -3630,6 +3647,7 @@ $('newWorld').onclick = () => {
 addEventListener('keydown', e => {
   if (craftOpen) { if (e.code === 'Escape' || e.code === 'KeyE' || e.code === 'Tab') { e.preventDefault(); closeCraft(true); } return; }
   if (bagOpen) { if (e.code === 'Escape' || e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); closeBag(true); } return; }
+  if (mapOpen) { if (e.code === 'Escape' || e.code === 'KeyM' || e.code === 'Tab') { e.preventDefault(); closeMap(true); } return; }
   if (e.code === 'Tab') { e.preventDefault(); if (catalogOpen) closeCatalog(true); else if (active()) openCatalog(); return; }
   if (catalogOpen) {
     if (e.code === 'Escape') { closeCatalog(false); exitToMenu(); }
@@ -3651,7 +3669,8 @@ addEventListener('keydown', e => {
     case 'KeyG': toggleSnap(); break;
     case 'KeyC': cycleColor(); break;
     case 'KeyF': toggleFly(); break;
-    case 'KeyM': toggleMute(); break;
+    case 'KeyM': openMap(); break;
+    case 'KeyV': toggleMute(); break;
     case 'KeyE': interact(); break;
     case 'KeyI': openBag(); break;
     case 'KeyQ': curSlot = curSlot < 0 ? (lastSlot ?? 0) : (lastSlot = curSlot, -1); onSlotChange(); break;
@@ -4871,7 +4890,8 @@ function updateWrist(dt) {
   const d = DEFS[curItem()];
   const held = d.kind === 'empty' ? '✋ Empty hands' : `${d.icon} ${d.name}${d.pal && d.pal.length > 1 && d.kind !== 'tool' ? ' · ' + d.pal[curVar(d.id)][0] : ''}`;
   const invLine = Object.keys(RES).filter(k => k === 'wood' || k === 'stone' || k === 'petals' || inv[k] > 0).map(k => `${RES[k][0]}${creative ? '∞' : inv[k]}`).join('  ');
-  const key = [held, wristText.hint, toastTimer > 0 ? wristText.toast : '', invLine, $('clockText').textContent, Math.round(fpsEma / 3)].join('|');
+  const where = coordText().replace('\n', '   ');
+  const key = [held, wristText.hint, toastTimer > 0 ? wristText.toast : '', invLine, $('clockText').textContent, Math.round(fpsEma / 3), where].join('|');
   if (key === wristKey) return;
   wristKey = key;
   const c = wristCtx;
@@ -4887,7 +4907,7 @@ function updateWrist(dt) {
   c.fillStyle = '#4a3b2f'; c.font = '700 22px Nunito, sans-serif';
   c.fillText(invLine.slice(0, 46), 22, 236);
   c.fillStyle = '#8a7766'; c.font = '700 18px Nunito, sans-serif';
-  c.fillText('X/Y slot · stick-click menu · B use · grip fly', 22, 276);
+  c.fillText(where.slice(0, 52), 22, 276);
   wristTex.needsUpdate = true;
 }
 
@@ -4931,6 +4951,7 @@ function drawUI() {
   btn(204, 20, 180, 50, '🎒 Backpack', () => { UI.mode = 'bag'; }, { on: UI.mode === 'bag' });
   if (UI.station) btn(394, 20, 200, 50, UI.station === 'furnace' ? '🔥 Furnace' : '🔨 Workbench', () => { UI.mode = 'craft'; }, { on: UI.mode === 'craft' });
   btn(UI.station ? 604 : 394, 20, 170, 50, '⚙️ Settings', () => { UI.mode = 'settings'; }, { on: UI.mode === 'settings' });
+  btn((UI.station ? 604 : 394) + 180, 20, 110, 50, '🗺️ Map', () => { UI.mode = 'map'; }, { on: UI.mode === 'map', size: 20 });
   btn(880, 20, 120, 50, '✕ Close', vrClose);
   if (UI.mode === 'settings') {
     const opts = [
@@ -4984,6 +5005,18 @@ function drawUI() {
     c.fillStyle = '#8a7766'; c.font = '800 20px Nunito, sans-serif'; c.fillText(`Page ${UI.page + 1}/${pages}`, 350, 682);
     const cur = DEFS[curItem()];
     if (cur.pal && cur.pal.length > 1 && cur.kind !== 'tool') btn(640, 650, 360, 50, `🎨 ${cur.name}: ${cur.pal[curVar(cur.id)][0]} ▶`, () => cycleColor(), { size: 19 });
+  } else if (UI.mode === 'map') {
+    UI.mpp ??= 2.5;
+    c.save(); roundRect(c, 24, 86, 976, 548, 18); c.clip(); c.translate(24, 86);
+    drawMap(c, 976, 548, P.pos.x, P.pos.z, UI.mpp, false);
+    c.restore();
+    const lines = coordText().split('\n');
+    c.fillStyle = 'rgba(255,247,234,.92)'; roundRect(c, 36, 98, 440, 22 + lines.length * 30, 14); c.fill();
+    c.fillStyle = '#4a3b2f'; c.font = '800 22px Nunito, sans-serif'; lines.forEach((l, i) => c.fillText(l, 52, 128 + i * 30));
+    btn(24, 648, 150, 54, '➕ Zoom in', () => { UI.mpp = Math.max(0.75, UI.mpp * 0.67); }, { size: 20 });
+    btn(184, 648, 150, 54, '➖ Zoom out', () => { UI.mpp = Math.min(48, UI.mpp * 1.5); }, { size: 20 });
+    btn(344, 648, 230, 54, '📍 Mark this spot', () => setWaypoint(P.pos.x, P.pos.z), { size: 20 });
+    btn(584, 648, 200, 54, '✖ Clear marker', () => setWaypoint(null), { dim: !waypoint, size: 20 });
   } else if (UI.mode === 'bag') {
     Object.entries(RES).forEach(([k, [icon, name]], i) => {
       const cx = 24 + (i % 5) * 196, cy = 96 + Math.floor(i / 5) * 190;
@@ -5229,6 +5262,238 @@ function updateSockets(dt) {
   sockGeo.attributes.position.needsUpdate = true;
 }
 
+// ---------------------------------------------------------------- map & coordinates
+// The map is painted straight from the terrain function, in tiles: land coloured like the ground, water by
+// depth, light from the north-west and a contour line every 10 m. North is up (-z), east is right (+x).
+const MAP_TILE = 64, MAP_LEVELS = [2, 8, 32];
+const mapTiles = new Map(), mapQueue = [], mapPending = new Set();
+const WATER_SHALLOW = new THREE.Color(0x7cc4dc), WATER_DEEP = new THREE.Color(0x3a74a6), _mc = new THREE.Color();
+let waypoint = save?.waypoint || null, mapOpen = false;
+const mapView = { x: 0, z: 0, mpp: 2, drag: null };
+function renderMapTile(lv, tx, tz) {
+  const mpp = MAP_LEVELS[lv], cv = document.createElement('canvas');
+  cv.width = cv.height = MAP_TILE;
+  const cx = cv.getContext('2d'), img = cx.createImageData(MAP_TILE, MAP_TILE), d = img.data;
+  const x0 = tx * MAP_TILE * mpp, z0 = tz * MAP_TILE * mpp;
+  for (let j = 0; j < MAP_TILE; j++) for (let i = 0; i < MAP_TILE; i++) {
+    const x = x0 + (i + 0.5) * mpp, z = z0 + (j + 0.5) * mpp;
+    const h = heightRaw(x, z), hx = heightRaw(x + mpp, z), hz = heightRaw(x, z + mpp);
+    let s;
+    if (h < WATER) {
+      _mc.copy(WATER_SHALLOW).lerp(WATER_DEEP, clamp(-h / 8, 0, 1));
+      s = hx >= WATER || hz >= WATER ? 0.8 : 1;
+    } else {
+      terrainColor(_mc, x, z, h, Math.hypot(hx - h, hz - h) / mpp);
+      s = clamp(1 + ((hx - h) + (hz - h)) / mpp * 0.9, 0.6, 1.35);
+      if (lv < 2 && (Math.floor(h / 10) !== Math.floor(hx / 10) || Math.floor(h / 10) !== Math.floor(hz / 10))) s *= 0.8;
+    }
+    const hex = _mc.multiplyScalar(s).getHex(), k = (j * MAP_TILE + i) * 4;
+    d[k] = hex >> 16; d[k + 1] = (hex >> 8) & 255; d[k + 2] = hex & 255; d[k + 3] = 255;
+  }
+  cx.putImageData(img, 0, 0);
+  return cv;
+}
+function mapTile(lv, tx, tz) {
+  const k = lv + ',' + tx + ',' + tz, t = mapTiles.get(k);
+  if (t) return t;
+  if (!mapPending.has(k)) { mapPending.add(k); mapQueue.push([lv, tx, tz, k]); }
+  return null;
+}
+function pumpMapTiles(budget) {
+  const t0 = performance.now();
+  // nearest-first: the newest requests are what's on screen right now
+  while (mapQueue.length && performance.now() - t0 < budget) {
+    const [lv, tx, tz, k] = mapQueue.pop();
+    mapPending.delete(k);
+    if (mapTiles.has(k)) continue;
+    mapTiles.set(k, renderMapTile(lv, tx, tz));
+    if (mapTiles.size > 700) mapTiles.delete(mapTiles.keys().next().value);
+  }
+  if (mapQueue.length > 400) { for (const q of mapQueue.splice(0, mapQueue.length - 400)) mapPending.delete(q[3]); }
+}
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const heading = () => (((-viewYaw()) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+const compassName = a => COMPASS[Math.round(a / (Math.PI / 4)) % 8];
+const ARROWS = ['⬆️', '↗️', '➡️', '↘️', '⬇️', '↙️', '⬅️', '↖️'];
+// paint the map centred on (cx, cz) at mpp metres per pixel
+function drawMap(c, W, H, cx, cz, mpp, mini) {
+  const lv = mpp <= 3 ? 0 : mpp <= 14 ? 1 : 2, tm = MAP_LEVELS[lv] * MAP_TILE;
+  const wx0 = cx - W / 2 * mpp, wz0 = cz - H / 2 * mpp, sz = tm / mpp;
+  c.fillStyle = '#e9dcc4'; c.fillRect(0, 0, W, H);
+  c.imageSmoothingEnabled = true;
+  for (let tz = Math.floor(wz0 / tm); tz * tm < wz0 + H * mpp; tz++) for (let tx = Math.floor(wx0 / tm); tx * tm < wx0 + W * mpp; tx++) {
+    const sx = (tx * tm - wx0) / mpp, sy = (tz * tm - wz0) / mpp;
+    let t = mapTile(lv, tx, tz);
+    if (t) { c.drawImage(t, sx, sy, sz + 0.6, sz + 0.6); continue; }
+    // while the detailed tile is being painted, stretch a coarser one over the gap
+    for (let k = lv + 1; k < MAP_LEVELS.length; k++) {
+      const tmc = MAP_LEVELS[k] * MAP_TILE, ctx = Math.floor(tx * tm / tmc), ctz = Math.floor(tz * tm / tmc), ct = mapTiles.get(k + ',' + ctx + ',' + ctz);
+      if (!ct) { if (k === MAP_LEVELS.length - 1) mapTile(k, ctx, ctz); continue; }
+      const ss = tm / MAP_LEVELS[k];
+      c.drawImage(ct, (tx * tm - ctx * tmc) / MAP_LEVELS[k], (tz * tm - ctz * tmc) / MAP_LEVELS[k], ss, ss, sx, sy, sz + 0.6, sz + 0.6);
+      break;
+    }
+  }
+  const S = (x, z) => [(x - wx0) / mpp, (z - wz0) / mpp];
+  // buildings
+  c.fillStyle = '#6a3e26';
+  const ps = mpp < 1.5 ? 4 : mpp < 6 ? 3 : 2;
+  for (const p of pieces) {
+    if (p.gen) continue;
+    const [x, y] = S(p.x, p.z);
+    if (x > -4 && y > -4 && x < W + 4 && y < H + 4) c.fillRect(x - ps / 2, y - ps / 2, ps, ps);
+  }
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  // places you've found
+  c.font = `${mini ? 14 : 18}px sans-serif`;
+  for (const a of areas) {
+    if (!found.has(a.id)) continue;
+    const [x, y] = S((a.x0 + a.x1) / 2, (a.z0 + a.z1) / 2);
+    if (x > -10 && y > -10 && x < W + 10 && y < H + 10) c.fillText(a.msg.split(' ')[0], x, y);
+  }
+  // your creatures
+  if (!mini) {
+    c.font = '13px sans-serif';
+    for (const a of animals) if (a.tame) { const [x, y] = S(a.x, a.z); if (x > 0 && y > 0 && x < W && y < H) c.fillText('🐾', x, y); }
+  }
+  // the marker, pinned to the edge when it's off the map
+  if (waypoint) {
+    let [x, y] = S(waypoint[0], waypoint[1]);
+    const out = x < 10 || y < 10 || x > W - 10 || y > H - 10;
+    if (out) {
+      const dx = x - W / 2, dy = y - H / 2, k = Math.min((W / 2 - 12) / Math.abs(dx || 1e-6), (H / 2 - 12) / Math.abs(dy || 1e-6));
+      x = W / 2 + dx * k; y = H / 2 + dy * k;
+      if (mini) { const r = Math.hypot(x - W / 2, y - H / 2), lim = W / 2 - 12; if (r > lim) { x = W / 2 + (x - W / 2) * lim / r; y = H / 2 + (y - H / 2) * lim / r; } }
+    }
+    c.font = `${mini ? 18 : 24}px sans-serif`; c.textBaseline = 'bottom';
+    c.globalAlpha = out ? 0.75 : 1; c.fillText('📍', x, y + (mini ? 4 : 6)); c.globalAlpha = 1;
+    c.textBaseline = 'middle';
+  }
+  // you
+  const [px, py] = S(P.pos.x, P.pos.z), hd = heading(), r = mini ? 8 : 11;
+  c.save(); c.translate(px, py); c.rotate(hd);
+  c.beginPath(); c.moveTo(0, -r * 1.25); c.lineTo(r * 0.85, r); c.lineTo(0, r * 0.45); c.lineTo(-r * 0.85, r); c.closePath();
+  c.fillStyle = '#e8916c'; c.fill(); c.lineWidth = 2.5; c.strokeStyle = '#fff'; c.stroke();
+  c.restore();
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+
+const miniCanvas = $('minimap'), miniCtx = miniCanvas.getContext('2d');
+function drawMinimap() {
+  const W = miniCanvas.width, c = miniCtx;
+  c.clearRect(0, 0, W, W);
+  c.save();
+  c.beginPath(); c.arc(W / 2, W / 2, W / 2 - 3, 0, Math.PI * 2); c.clip();
+  drawMap(c, W, W, P.pos.x, P.pos.z, 1.6, true);
+  c.restore();
+  c.lineWidth = 5; c.strokeStyle = '#fff7ea'; c.beginPath(); c.arc(W / 2, W / 2, W / 2 - 3, 0, Math.PI * 2); c.stroke();
+  c.fillStyle = '#fff7ea'; c.beginPath(); c.arc(W / 2, 13, 11, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#c0704f'; c.font = '900 14px Nunito, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('N', W / 2, 14);
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+function coordText() {
+  const x = Math.round(P.pos.x), z = Math.round(P.pos.z), y = Math.round(P.pos.y), hd = heading();
+  let s = `X ${x}  Z ${z}  ·  ${y < -0.5 ? '⬇️' : '⛰️'} ${y} m  ·  🧭 ${compassName(hd)}`;
+  if (waypoint) {
+    const dx = waypoint[0] - P.pos.x, dz = waypoint[1] - P.pos.z, d = Math.hypot(dx, dz);
+    const rel = (((Math.atan2(dx, -dz) - hd) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+    s += `\n📍 ${d < 1000 ? Math.round(d) + ' m' : (d / 1000).toFixed(1) + ' km'} ${d < 4 ? '— you\'re here!' : ARROWS[Math.round(((rel + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8]}`;
+  }
+  return s;
+}
+// a tall soft beam of light standing on the marker, so you can find it in the world
+const beamMat = new THREE.MeshBasicMaterial({ color: 0xff9a6a, transparent: true, opacity: 0.32, depthWrite: false, toneMapped: false, fog: false });
+const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 140, 10, 1, true), beamMat);
+beam.raycast = () => {}; beam.visible = false; beam.renderOrder = 5;
+scene.add(beam);
+function setWaypoint(x, z) {
+  waypoint = x === null ? null : [Math.round(x), Math.round(z)];
+  dirty = true; sfx(waypoint ? 'place' : 'remove');
+  toast(waypoint ? `📍 Marker set at X ${waypoint[0]}, Z ${waypoint[1]}` : '📍 Marker cleared');
+}
+
+// full-screen map
+const mapCanvas = $('mapCanvas'), mapCtx = mapCanvas.getContext('2d');
+function openMap() {
+  if (xrOn) { vrOpen('map'); return; }
+  mapOpen = true; freeMode = false; document.body.classList.remove('free');
+  mapView.x = P.pos.x; mapView.z = P.pos.z;
+  $('mapView').classList.remove('hidden');
+  if (document.pointerLockElement) document.exitPointerLock();
+  sizeMap(); drawFullMap(); sfx('ui');
+}
+function closeMap(relock) { mapOpen = false; $('mapView').classList.add('hidden'); if (relock) lock(); }
+function sizeMap() { const r = mapCanvas.getBoundingClientRect(); mapCanvas.width = Math.max(200, r.width | 0); mapCanvas.height = Math.max(200, r.height | 0); }
+let mapHover = null;
+function drawFullMap() {
+  const W = mapCanvas.width, H = mapCanvas.height, c = mapCtx;
+  drawMap(c, W, H, mapView.x, mapView.z, mapView.mpp, false);
+  // scale bar
+  const nice = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000].find(m => m / mapView.mpp > 70) || 5000, bw = nice / mapView.mpp;
+  c.fillStyle = 'rgba(255,247,234,.9)'; roundRect(c, 12, H - 44, bw + 28, 32, 10); c.fill();
+  c.fillStyle = '#4a3b2f'; c.fillRect(26, H - 24, bw, 4); c.fillRect(26, H - 30, 2, 10); c.fillRect(24 + bw, H - 30, 2, 10);
+  c.font = '800 12px Nunito, sans-serif'; c.fillText(nice >= 1000 ? nice / 1000 + ' km' : nice + ' m', 30, H - 30);
+  // compass rose
+  c.fillStyle = 'rgba(255,247,234,.9)'; c.beginPath(); c.arc(W - 36, 36, 24, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#c0704f'; c.beginPath(); c.moveTo(W - 36, 16); c.lineTo(W - 29, 36); c.lineTo(W - 43, 36); c.fill();
+  c.fillStyle = '#8a7766'; c.beginPath(); c.moveTo(W - 36, 56); c.lineTo(W - 29, 36); c.lineTo(W - 43, 36); c.fill();
+  c.fillStyle = '#4a3b2f'; c.font = '900 11px Nunito, sans-serif'; c.textAlign = 'center'; c.fillText('N', W - 36, 12 + 2); c.textAlign = 'left';
+  const me = `You: X ${Math.round(P.pos.x)}, Z ${Math.round(P.pos.z)} · ${Math.round(P.pos.y)} m up · facing ${compassName(heading())}`;
+  $('mapSub').textContent = mapHover ? `${me}   ·   Pointer: X ${mapHover[0]}, Z ${mapHover[1]} · ${Math.round(heightRaw(mapHover[0], mapHover[1]))} m` : me;
+}
+const mapWorld = e => {
+  const r = mapCanvas.getBoundingClientRect(), sx = (e.clientX - r.left) * mapCanvas.width / r.width, sy = (e.clientY - r.top) * mapCanvas.height / r.height;
+  return [mapView.x + (sx - mapCanvas.width / 2) * mapView.mpp, mapView.z + (sy - mapCanvas.height / 2) * mapView.mpp];
+};
+mapCanvas.addEventListener('pointerdown', e => { mapView.drag = { x: e.clientX, y: e.clientY, vx: mapView.x, vz: mapView.z, moved: false }; mapCanvas.setPointerCapture(e.pointerId); });
+mapCanvas.addEventListener('pointermove', e => {
+  const w = mapWorld(e); mapHover = [Math.round(w[0]), Math.round(w[1])];
+  const D = mapView.drag;
+  if (D) {
+    const k = mapCanvas.width / mapCanvas.getBoundingClientRect().width;
+    if (Math.abs(e.clientX - D.x) + Math.abs(e.clientY - D.y) > 4) D.moved = true;
+    mapView.x = D.vx - (e.clientX - D.x) * k * mapView.mpp; mapView.z = D.vz - (e.clientY - D.y) * k * mapView.mpp;
+  }
+  drawFullMap();
+});
+mapCanvas.addEventListener('pointerup', e => {
+  const D = mapView.drag; mapView.drag = null;
+  if (D && !D.moved) { const [x, z] = mapWorld(e); if (e.button === 2 || (waypoint && Math.hypot(x - waypoint[0], z - waypoint[1]) < 10 * mapView.mpp)) setWaypoint(null); else setWaypoint(x, z); drawFullMap(); }
+});
+mapCanvas.addEventListener('contextmenu', e => e.preventDefault());
+mapCanvas.addEventListener('pointerleave', () => { mapHover = null; drawFullMap(); });
+mapCanvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [wx, wz] = mapWorld(e), f = e.deltaY > 0 ? 1.25 : 0.8, m = clamp(mapView.mpp * f, 0.5, 48);
+  mapView.x = wx + (mapView.x - wx) * m / mapView.mpp; mapView.z = wz + (mapView.z - wz) * m / mapView.mpp; mapView.mpp = m;
+  drawFullMap();
+}, { passive: false });
+$('mapMe').onclick = () => { mapView.x = P.pos.x; mapView.z = P.pos.z; drawFullMap(); };
+$('mapMark').onclick = () => { setWaypoint(P.pos.x, P.pos.z); drawFullMap(); };
+$('mapClear').onclick = () => { setWaypoint(null); drawFullMap(); };
+$('mapZoomIn').onclick = () => { mapView.mpp = clamp(mapView.mpp * 0.67, 0.5, 48); drawFullMap(); };
+$('mapZoomOut').onclick = () => { mapView.mpp = clamp(mapView.mpp * 1.5, 0.5, 48); drawFullMap(); };
+addEventListener('resize', () => { if (mapOpen) { sizeMap(); drawFullMap(); } });
+
+let mapT = 0, coordsKey = '';
+function updateMap(dt) {
+  pumpMapTiles(mapOpen || (xrOn && UI.open && UI.mode === 'map') ? 12 : 3);
+  if (waypoint) {
+    const d = Math.hypot(waypoint[0] - P.pos.x, waypoint[1] - P.pos.z);
+    beam.visible = d > 5;
+    beam.position.set(waypoint[0], Math.max(heightAt(waypoint[0], waypoint[1]), WATER) + 70, waypoint[1]);
+    beamMat.opacity = 0.3 + 0.2 * smooth(20, 120, d) + Math.sin(envT * 2) * 0.05;
+    beam.scale.x = beam.scale.z = clamp(d / 30, 1, 8);
+  } else beam.visible = false;
+  if ((mapT -= dt) > 0) return;
+  mapT = xrOn ? 0.5 : 0.12;
+  if (xrOn) { if (UI.open && UI.mode === 'map') drawUI(); return; }
+  drawMinimap();
+  const t = coordText();
+  if (t !== coordsKey) { coordsKey = t; $('coords').textContent = t; }
+  if (mapOpen) drawFullMap();
+}
+
 let dirty = false, unloading = false;
 function saveGame() {
   if (unloading || TEST) return;
@@ -5238,7 +5503,7 @@ function saveGame() {
     seed: SEED, inv, owned: [...owned], hours, dayNum, clockMode, slots, varSel, snapOn, creative, fly: P.fly, muted: A.muted, harvested,
     player: { x: P.pos.x, y: P.pos.y, z: P.pos.z, yaw: P.yaw, pitch: P.pitch },
     pieces: pieces.filter(p => !p.gen).map(p => [p.id, p.x, p.y, p.z, +p.rot.toFixed(4), p.v]),
-    dug: [...dug].filter(k => !natural.has(k)), filledNat: [...filledNat], looted: [...looted], found: [...found],
+    dug: [...dug].filter(k => !natural.has(k)), filledNat: [...filledNat], looted: [...looted], found: [...found], waypoint,
     creatures: animals.filter(a => a.tame).map(a => [a.type, +a.home.x.toFixed(2), +a.home.z.toFixed(2), a.v, a.name || '']),
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { console.warn('save failed', e); }
@@ -5274,6 +5539,7 @@ function frame(now) {
   if (((now / 1000) | 0) !== (((now - dt * 1000) / 1000) | 0)) updateClock();
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) $('toast').classList.remove('show'); }
   updateEnv(running ? dt : 0);
+  updateMap(dt);
   if (renderer.xr.isPresenting) renderer.render(scene, camera); else composer.render();
 }
 
@@ -5315,7 +5581,7 @@ function boot() {
   renderer.setAnimationLoop(frame);
 }
 boot();
-window.__cosy = { natural, ramps, genDeco, areas, found, openChest, cracks, dunBlocks, digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
+window.__cosy = { openMap, closeMap, drawMap, mapTiles, mapView, setWaypoint, get waypoint() { return waypoint; }, natural, ramps, genDeco, areas, found, openChest, cracks, dunBlocks, digBlock, fillBlock, dug, openCols, caveGround, aoPass, matVC, placeBlueprint, computePlan, vrOpen, drawUI, UI, updateWrist, wristCanvas, applyQuality, openBag, get curSlot() { return curSlot; }, openCraft, craft, RECIPES, owned, chunks, hitEnt, animals, releaseCreature, partThumb, DEFS, ANIMALS, toggleCreative, enterFreeMode, DEF_LIST, pieceGeo, openCatalog, moonDir, MOON_PHASE, P, pieces, inv, createPiece, primary, secondary, slots, setSlot: i => { curSlot = i; renderHotbar(); }, get plan() { return plan; }, get target() { return target; }, get hours() { return hours; }, set hours(v) { hours = v; } };
 </script>
 </body>
 </html>
