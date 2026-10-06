@@ -170,7 +170,7 @@
     <kbd>Q</kbd><span>Empty hands (to interact)</span><kbd>I</kbd><span>Backpack</span>
     <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>P</kbd><span>Fullscreen</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
   </div>
-  <p class="small">Animal and people models by Quaternius (CC0); cat, hen, rooster, rabbit and mallard by Poly by Google (CC-BY 3.0) — see assets/CREDITS.md.</p>
+  <p class="small">Animal, people and tool models by Quaternius, Armory_3D and CreativeTrio (CC0); cat, hen, rooster, rabbit and mallard by Poly by Google (CC-BY 3.0) — see assets/CREDITS.md.</p>
   <p class="small">Your world saves automatically in this browser. Trees and flowers regrow after a while.</p>
 </div></div>
 
@@ -2781,6 +2781,36 @@ function toolGeo(kind, c, mat = 'iron') {
   }
   return { parts: p };
 }
+// real tool models (assets/models/tool_*.glb), turned so the handle runs up +y with the head at the top
+// (blade towards +z), scaled to length; the procedural tool above stands in until a file loads
+const TOOL_MODELS = {
+  hand: { file: 'tool_axe', rot: [0, Math.PI / 2, 0], len: 1.0, head: [/Material\.002/, 0x8d8a84, 0.95] },
+  axe_iron: { file: 'tool_axe', rot: [0, Math.PI / 2, 0], len: 1.0, head: [/Material\.002/, 0x9aa0a8, 0.4] },
+  pick_stone: { file: 'tool_pick_stone', rot: [0, 0, 0], len: 1.0 },
+  pick_copper: { file: 'tool_pick', rot: [Math.PI / 2, 0, 0], len: 1.0, tint: [1.2, 0.82, 0.6] },
+  pick_iron: { file: 'tool_pick', rot: [Math.PI / 2, 0, 0], len: 1.0 },
+  shovel: { file: 'tool_spade', rot: [Math.PI / 2, 0, 0], len: 1.1 },
+};
+function toolModel(id, onReady) {
+  const T = TOOL_MODELS[id];
+  if (!T) return null;
+  const m = loadModel(T.file);
+  if (!m.ready) { if (onReady && !m.failed) m.cbs.push(onReady); return null; }
+  const turn = new THREE.Group(), g = new THREE.Group(), inner = m.scene.clone(true);
+  turn.rotation.set(...T.rot); turn.add(inner); turn.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(turn, true), c = box.getCenter(new V3()), k = T.len / box.getSize(new V3()).y;
+  turn.scale.setScalar(k); turn.position.set(-c.x * k, -box.min.y * k, -c.z * k);
+  inner.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    if (!T.head && !T.tint) return;
+    o.material = o.material.clone();
+    if (T.tint) o.material.color.multiply(new THREE.Color(...T.tint));
+    if (T.head && T.head[0].test(o.material.name)) { o.material.color.setHex(T.head[1]); o.material.roughness = T.head[2]; o.material.metalness = T.head[2] < 0.6 ? 0.7 : 0; }
+  });
+  g.add(turn);
+  return g;
+}
 const TOOL = (id, name, short, icon, kind, metal, stats) => ({ id, kind: 'tool', name, short, icon, cat: 'Tools', pal: [[metal[0].toUpperCase() + metal.slice(1), METAL[metal]]], build: c => toolGeo(kind, c, metal), family: kind, ...stats, surf: metal === 'stone' ? SURF.stone : SURF.metal });
 Object.assign(DEF_LIST.find(d => d.id === 'hand'), { kind: 'tool', family: 'axe', tier: 0, mine: 1, chop: 1, pal: [['Stone', METAL.stone]], build: c => toolGeo('axe', c, 'stone'), surf: SURF.stone, name: 'Stone Axe', short: 'Axe' });
 DEF_LIST.push(
@@ -3852,7 +3882,7 @@ function partThumb(id, v) {
   }
   let grp;
   if (DEFS[id].kind === 'creature') {
-    const t = DEFS[id].type, file = !ANIMALS[t].ghost && modelFile(t, v), m = file ? loadModel(file) : null;
+    const t = DEFS[id].type, file = modelFile(t, v), m = file ? loadModel(file) : null;
     if (m && m.ready) {
       grp = makeModelInstance(t, v, file, m).g;
       grp.updateMatrixWorld(true); grp.traverse(o => { if (o.isSkinnedMesh) o.skeleton.update(); });
@@ -3862,6 +3892,7 @@ function partThumb(id, v) {
     }
   }
   else if (DEFS[id].kind === 'blueprint') grp = blueprintGroup(DEFS[id]);
+  else if (TOOL_MODELS[id] && (grp = toolModel(id, () => { thumbCache.delete(key); imgCache.clear(); renderHotbar(); if (catalogOpen) buildCatalog(); if (bagOpen) renderBag(); }))) {}
   else {
     const { g, glow, spin } = pieceGeo(id, v);
     grp = new THREE.Group();
@@ -4115,7 +4146,7 @@ function updateViewModel(dt) {
   const d = DEFS[curItem()], key = d.kind === 'tool' ? d.id : '';
   if (key !== vmKey) {
     vmKey = key; vm.clear();
-    if (key) { const m = new THREE.Mesh(pieceGeo(d.id, 0).g, matVC); m.scale.setScalar(0.42); m.position.y = -0.2; vm.add(m); }
+    if (key) { const m = toolModel(d.id, () => { vmKey = ''; }) || new THREE.Mesh(pieceGeo(d.id, 0).g, matVC); m.scale.setScalar(0.42); m.position.y = -0.2; m.rotation.y = Math.PI; vm.add(m); }
   }
   vmSwing = Math.max(0, vmSwing - dt * 4);
   const s = Math.sin(vmSwing * Math.PI);
@@ -5145,14 +5176,14 @@ const MODEL_FILES = {
   chicken: ['hen', 'rooster', 'hen'], pig: ['pig'], cow: ['cow', 'cow_brown', 'cow_brown'], horse: ['horse_bay', 'horse', 'horse_white', 'horse_bay'],
   unicorn: ['horse_white'], wolf: ['wolf'], donkey: ['donkey'], alpaca: ['alpaca'], llama: ['llama'], bull: ['bull'],
   villager: ['man', 'woman4', 'woman1', 'man', 'woman1', 'woman4'], farmer: ['farmer'], baker: ['woman_dress'], child: ['woman3', 'man'], elder: ['woman2', 'adventurer'],
-  dragon: ['dragon'], babydragon: ['dragon'], trex: ['trex'], raptor: ['raptor'], trike: ['trike'], stego: ['stego'], bronto: ['bronto'],
+  dragon: ['dragon'], babydragon: ['dragon'], fairy: ['woman_dress'], gnome: ['man'], ghost: ['woman_dress'], trex: ['trex'], raptor: ['raptor'], trike: ['trike'], stego: ['stego'], bronto: ['bronto'],
 };
 // how big each one should be: body length for animals, standing height for people and birds
 const MODEL_FIT = {
   rabbit: { len: 0.42 }, deer: { len: 1.6 }, sheep: { len: 1.25 }, fox: { len: 1.0 }, duck: { len: 0.5 }, cat: { len: 0.62 }, dog: { len: 0.95 },
   chicken: { h: 0.5 }, pig: { len: 1.3 }, cow: { len: 2.3 }, horse: { len: 2.3 }, unicorn: { len: 2.3 }, wolf: { len: 1.4 }, donkey: { len: 1.9 },
   alpaca: { len: 1.7 }, llama: { len: 1.8 }, bull: { len: 2.4 }, villager: { h: 1.75 }, farmer: { h: 1.75 }, baker: { h: 1.72 }, child: { h: 1.75 }, elder: { h: 1.7 },
-  dragon: { len: 6 }, babydragon: { len: 6 }, trex: { len: 7 }, raptor: { len: 2.2 }, trike: { len: 6 }, stego: { len: 6.5 }, bronto: { len: 14 },
+  dragon: { len: 6 }, babydragon: { len: 6 }, fairy: { h: 0.32 }, gnome: { h: 1.75 }, ghost: { h: 1.75 }, trex: { len: 7 }, raptor: { len: 2.2 }, trike: { len: 6 }, stego: { len: 6.5 }, bronto: { len: 14 },
 };
 // colour variants the files don't have, done by tinting
 const MODEL_TINT = { sheep: [null, [1.0, 0.95, 0.85], [0.3, 0.28, 0.27]], horse: [null, null, null, [0.28, 0.25, 0.24]], cat: [[1.25, 0.8, 0.5], null, [0.3, 0.3, 0.32], [1.2, 1.12, 1.0]] };
@@ -5214,18 +5245,59 @@ function makeModelInstance(type, v, file, m) {
       head.add(horn);
     }
   }
+  const extra = fantasyExtras(type, v, root, g, fit.h || 1);
   const clips = m.clips, mixer = clips.length ? new THREE.AnimationMixer(root) : null;
   const act = re => { const c = pickClip(clips, re); return c && mixer ? mixer.clipAction(c) : null; };
   const acts = mixer ? {
     idle: act(/(^|_)idle(_neutral)?$/i) || act(/idle/i), walk: act(/(^|_)walk(ing)?$/i), run: act(/(^|_)(run|running|gallop)$/i),
-    eat: act(/(eating|headlow)$/i), talk: act(/^(interact|.*_clapping)$/i) || act(/standing$/i), fly: act(/flying$/i),
+    eat: act(/(eating|headlow)$/i), death: act(/death$/i), talk: act(/^(interact|.*_clapping)$/i) || act(/standing$/i), fly: act(/flying$/i),
   } : {};
   const meshes = [];
   root.traverse(o => { if (o.isMesh) meshes.push(o); });
-  return { g, mixer, acts, cur: null, phase: Math.random() * 6, meshes, shadow: true, acc: 0 };
+  return { g, mixer, acts, cur: null, phase: Math.random() * 6, meshes, shadow: true, acc: 0, ...extra };
+}
+// what turns a person model into a fairy, a gnome or a ghost
+const ghostSkinMat = new THREE.MeshStandardMaterial({ color: 0xdfe8ff, transparent: true, opacity: 0.42, emissive: 0x7f9cff, emissiveIntensity: 0.55, depthWrite: false });
+function fantasyExtras(type, v, root, g, H) {
+  if (type !== 'fairy' && type !== 'gnome' && type !== 'ghost') return {};
+  const pal = DEFS['c_' + type]?.pal, col = pal ? pal[v % pal.length][1] : 0xffffff;
+  if (type === 'ghost') { root.traverse(o => { if (o.isMesh) { o.material = ghostSkinMat; o.castShadow = false; } }); return {}; }
+  g.updateMatrixWorld(true);
+  let head = null, chest = null;
+  root.traverse(o => {
+    if (!o.isBone) return;
+    if (/head/i.test(o.name) && (!head || o.name.length < head.name.length)) head = o;
+    if (/spine|chest/i.test(o.name)) chest = o;
+  });
+  const hp = head ? head.getWorldPosition(new V3()) : new V3(0, H * 0.88, 0);
+  const pin = (mesh, bone) => { g.add(mesh); g.updateMatrixWorld(true); if (bone) bone.attach(mesh); };
+  if (type === 'gnome') {
+    const hat = new THREE.Mesh(new THREE.ConeGeometry(H * 0.1, H * 0.34, 24), new THREE.MeshStandardMaterial({ color: col, roughness: 0.85 }));
+    hat.position.set(hp.x, H * 0.985 + H * 0.15, hp.z - H * 0.01); hat.rotation.x = -0.18; hat.castShadow = true;
+    const beard = new THREE.Mesh(new THREE.SphereGeometry(H * 0.07, 18, 12), new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 0.95 }));
+    beard.scale.set(1, 1.5, 0.7); beard.position.set(hp.x, H * 0.84, hp.z + H * 0.05); beard.castShadow = true;
+    pin(hat, head); pin(beard, head);
+    return {};
+  }
+  // fairy: dress in her colour, and gauzy wings that beat on her back
+  root.traverse(o => { if (o.isMesh && /dress/i.test([].concat(o.material)[0].name)) { o.material = o.material.clone(); o.material.color.setHex(col); } });
+  const sh = new THREE.Shape();
+  sh.moveTo(0, 0); sh.bezierCurveTo(0.2, 0.55, 0.75, 0.75, 0.95, 0.45); sh.bezierCurveTo(1.0, 0.2, 0.55, 0.05, 0.3, -0.05);
+  sh.bezierCurveTo(0.6, -0.25, 0.55, -0.6, 0.3, -0.55); sh.bezierCurveTo(0.12, -0.45, 0.05, -0.2, 0, 0);
+  const wg = new THREE.ShapeGeometry(sh, 16); wg.scale(H * 0.42, H * 0.42, 1);
+  const wm = new THREE.MeshStandardMaterial({ color: new THREE.Color(col).lerp(new THREE.Color(0xffffff), 0.5), emissive: col, emissiveIntensity: 0.35, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false });
+  const cp = chest ? chest.getWorldPosition(new V3()) : new V3(0, H * 0.7, 0), wings = [];
+  for (const s2 of [1, -1]) {
+    const hinge = new THREE.Group(), w = new THREE.Mesh(wg, wm);
+    w.scale.x = s2; hinge.add(w);
+    hinge.position.set(cp.x + s2 * H * 0.02, cp.y + H * 0.03, cp.z - H * 0.06);
+    hinge.userData.side = s2;
+    pin(hinge, chest); wings.push(hinge);
+  }
+  return { fairyWings: wings };
 }
 function attachModel(a, m, file) {
-  if (!animals.includes(a) || a.sleeper || a.model) return;
+  if (!animals.includes(a) || a.model) return;
   const inst = makeModelInstance(a.type, a.v, file, m);
   a.g.clear(); a.g.add(inst.g);
   a.head = null; a.legs = []; a.arms = []; a.wings = [];
@@ -5233,7 +5305,7 @@ function attachModel(a, m, file) {
   a.g.traverse(o => { o.userData.animal = a; });
 }
 function wantModel(a) {
-  const file = !a.D.ghost && modelFile(a.type, a.v);
+  const file = modelFile(a.type, a.v);
   if (!file) return;
   const m = loadModel(file);
   if (m.ready) Promise.resolve().then(() => attachModel(a, m, file));
@@ -5255,6 +5327,7 @@ function animateModel(a, dt, dp) {
   if (M.cur) M.cur.timeScale = M.cur === A.walk ? clamp(a.speed / Math.max(0.3, D.walk), 0.6, 1.8) : M.cur === A.run ? clamp(a.speed / Math.max(1, D.run), 0.7, 1.6) : 1;
   M.acc += dt;
   if (M.mixer && M.acc >= (dp < 25 ? 0 : dp < 55 ? 0.05 : 0.12)) { M.mixer.update(M.acc); M.acc = 0; }
+  if (M.fairyWings) for (const w of M.fairyWings) w.rotation.y = w.userData.side * (0.25 + Math.abs(Math.sin(envT * 22 + a.seed)) * 0.9);
   if (a.speed > 0.15 && !(M.cur && (M.cur === A.walk || M.cur === A.run)) && !D.hop && a.state !== 'fly') {
     M.phase += dt * a.speed * 9 / a.scale;
     M.g.position.y = Math.abs(Math.sin(M.phase)) * 0.04 * a.scale;
@@ -5494,7 +5567,12 @@ function sleepPose(a, dt, dp) {
   a.y = groundAt(a.x, a.z, a.y + 0.5);
   const s = a.scale, br = Math.sin(envT * 1.1 + a.seed);
   // curled up: belly on the gold, legs tucked, chin down
-  a.g.position.set(a.x, a.y - 0.98 * s, a.z); a.g.rotation.set(0, a.yaw, 0);
+  a.g.position.set(a.x, a.y - (a.model ? 0 : 0.98 * s), a.z); a.g.rotation.set(0, a.yaw, 0);
+  if (a.model) {
+    const M = a.model;
+    if (!M.slept && M.acts.death) { M.slept = true; M.acts.death.setLoop(THREE.LoopOnce, 1); M.acts.death.clampWhenFinished = true; M.acts.death.play(); }
+    M.mixer?.update(dt);
+  }
   a.g.scale.set(s, s * (1 + br * 0.035), s * (1 + br * 0.012));
   for (const l of a.legs) l.rotation.x = l.position.z > 0 ? -1.45 : 1.45;
   for (const w of a.wings) w.rotation.z = 1.18 * w.userData.side;

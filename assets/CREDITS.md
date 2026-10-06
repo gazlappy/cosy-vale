@@ -49,3 +49,12 @@ Used unmodified apart from scaling and colour tinting in the game.
 | rooster.glb | Rooster by Poly by Google | https://poly.pizza/m/6NTegstc5Jy |
 | rabbit.glb | Rabbit by Poly by Google | https://poly.pizza/m/9OBTRVYUSmt |
 | duck.glb | Mallard duck by Poly by Google | https://poly.pizza/m/frSLi6b6Vid |
+
+## Tools — CC0 1.0 (public domain)
+
+| File | Model | Source |
+|---|---|---|
+| tool_axe.glb | Axe by Armory_3D | https://poly.pizza/m/jYnW3DNd7J |
+| tool_pick.glb | Pickaxe by CreativeTrio | https://poly.pizza/m/cJp88qPPLc |
+| tool_pick_stone.glb | Stone Pickaxe by Quaternius | https://poly.pizza/m/pvOeJ5EcpW |
+| tool_spade.glb | Spade by CreativeTrio | https://poly.pizza/m/570CC3ij3V |
