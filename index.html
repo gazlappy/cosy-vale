@@ -170,6 +170,7 @@
     <kbd>Q</kbd><span>Empty hands (to interact)</span><kbd>I</kbd><span>Backpack</span>
     <kbd>M</kbd><span>Map · click it to drop a marker</span><kbd>V</kbd><span>Mute music</span><kbd>P</kbd><span>Fullscreen</span><kbd>Shift+C+R</kbd><span>Creative mode</span>
   </div>
+  <p class="small">Animal and people models by Quaternius (CC0); cat, hen, rooster, rabbit and mallard by Poly by Google (CC-BY 3.0) — see assets/CREDITS.md.</p>
   <p class="small">Your world saves automatically in this browser. Trees and flowers regrow after a while.</p>
 </div></div>
 
@@ -184,6 +185,8 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 const $ = id => document.getElementById(id);
 const V3 = THREE.Vector3;
@@ -3561,7 +3564,9 @@ for (const [cat, list] of [
     ['chicken', 'Chicken', '🐔', [['White', 0xf4f0e6], ['Brown', 0xa8683c], ['Black', 0x3a3434]]],
     ['pig', 'Pig', '🐖', [['Pink', 0xf0b0b0], ['Spotty', 0xecc4b4], ['Black', 0x4a3e3e]]],
     ['cow', 'Cow', '🐄', [['Friesian', 0xf4f0ea], ['Highland', 0xc0703a], ['Jersey', 0x9a6a40]]],
-    ['horse', 'Horse', '🐎', [['Bay', 0x8a5030], ['Chestnut', 0xb0642e], ['Grey', 0xb8b4ae], ['Black', 0x2e2a28]]]]],
+    ['horse', 'Horse', '🐎', [['Bay', 0x8a5030], ['Chestnut', 0xb0642e], ['Grey', 0xb8b4ae], ['Black', 0x2e2a28]]],
+    ['donkey', 'Donkey', '🐴', [['Grey', 0x8a8682]]], ['bull', 'Bull', '🐂', [['Black', 0x2a2624]]],
+    ['alpaca', 'Alpaca', '🦙', [['Fawn', 0xc8a070]]], ['llama', 'Llama', '🦙', [['Brown', 0x8a5a3a]]], ['wolf', 'Wolf', '🐺', [['Grey', 0x8a8a8a]]]]],
   ['People', [
     ['villager', 'Villager', '🧑', FABRIC], ['farmer', 'Farmer', '👨‍🌾', FABRIC], ['baker', 'Baker', '👩‍🍳', FABRIC], ['child', 'Child', '🧒', FABRIC], ['elder', 'Elder', '👵', FABRIC]]],
   ['Creatures', [
@@ -3846,7 +3851,16 @@ function partThumb(id, v) {
     thumbGlow = new THREE.MeshStandardMaterial({ color: 0xffe2a8, emissive: 0xffb347, emissiveIntensity: 0.9 });
   }
   let grp;
-  if (DEFS[id].kind === 'creature') grp = buildCreature(DEFS[id].type, v).g;
+  if (DEFS[id].kind === 'creature') {
+    const t = DEFS[id].type, file = !ANIMALS[t].ghost && modelFile(t, v), m = file ? loadModel(file) : null;
+    if (m && m.ready) {
+      grp = makeModelInstance(t, v, file, m).g;
+      grp.updateMatrixWorld(true); grp.traverse(o => { if (o.isSkinnedMesh) o.skeleton.update(); });
+    } else {
+      grp = buildCreature(t, v).g;
+      if (m && !m.failed && !m.thumbHook) { m.thumbHook = true; m.cbs.push(() => { for (const k of [...thumbCache.keys()]) if (k.startsWith('c_')) thumbCache.delete(k); imgCache.clear(); if (catalogOpen) buildCatalog(); if (UI.open) drawUI(); }); }
+    }
+  }
   else if (DEFS[id].kind === 'blueprint') grp = blueprintGroup(DEFS[id]);
   else {
     const { g, glow, spin } = pieceGeo(id, v);
@@ -3856,7 +3870,7 @@ function partThumb(id, v) {
     if (glow) grp.add(new THREE.Mesh(glow, DEFS[id].glow === 'window' ? glowMats.window : thumbGlow));
   }
   thumbScene.add(grp);
-  const box = new THREE.Box3().setFromObject(grp), c = box.getCenter(new V3()), size = box.getSize(new V3());
+  const box = new THREE.Box3().setFromObject(grp, DEFS[id].kind === 'creature'), c = box.getCenter(new V3()), size = box.getSize(new V3());
   const rad = size.length() / 2;
   const dist = rad / Math.sin(THREE.MathUtils.degToRad(thumbCam.fov / 2)) * 0.92;
   thumbCam.position.copy(c).addScaledVector(new V3(0.62, 0.48, 1).normalize(), dist);
@@ -4781,6 +4795,8 @@ function updateEnv(dt) {
 // click: it stays near that spot, never runs off, and is saved with the world.
 const animalsGroup = new THREE.Group();
 scene.add(animalsGroup);
+// skinned creatures are left out of the ambient-occlusion pass: re-skinning them for it costs more than it adds
+{ const aoRender = aoPass.render.bind(aoPass); aoPass.render = (...args) => { const v = animalsGroup.visible; animalsGroup.visible = false; aoRender(...args); animalsGroup.visible = v; }; }
 const animals = [];
 // smooth stand-ins for the box and faceted primitives, so creatures and people read as soft and rounded
 function RB(w, h, d, x, y, z, col, rx = 0, ry = 0, rz = 0) {
@@ -5068,6 +5084,11 @@ const ANIMALS = {
   trike: { name: 'Triceratops', walk: 0.9 },
   stego: { name: 'Stegosaurus', walk: 0.8 },
   bronto: { name: 'Brontosaurus', walk: 0.7 },
+  wolf: { name: 'Wolf', model: 'dog', walk: 1.5, run: 6 },
+  donkey: { name: 'Donkey', model: 'horse', walk: 1.1, run: 4, sound: 'neigh' },
+  alpaca: { name: 'Alpaca', model: 'horse', walk: 1.0, run: 4 },
+  llama: { name: 'Llama', model: 'horse', walk: 1.0, run: 4 },
+  bull: { name: 'Bull', model: 'cow', walk: 0.6, run: 3, sound: 'moo' },
   ghost: { name: 'Ghost', person: true, walk: 0.4, model: 'villager', ghost: true, stay: true },
 };
 for (const D of Object.values(ANIMALS)) { D.n ??= 0; D.run ??= D.walk * 3; D.flee ??= 0; D.size ??= 1; D.ok ??= LAND; }
@@ -5116,6 +5137,130 @@ function buildCreature(type, v) {
   }
   return out;
 }
+// ---- real models: rigged, animated animals and people loaded from assets/models (credits in assets/CREDITS.md)
+// Each type picks a model file by colour variant; the procedural model above stands in until the file has loaded,
+// and stays for the fantasy folk (fairies, gnomes, ghosts) and for dragons asleep on their hoards.
+const MODEL_FILES = {
+  rabbit: ['rabbit'], deer: ['deer', 'stag'], sheep: ['sheep'], fox: ['fox'], duck: ['duck'], cat: ['cat'], dog: ['shiba', 'husky'],
+  chicken: ['hen', 'rooster', 'hen'], pig: ['pig'], cow: ['cow', 'cow_brown', 'cow_brown'], horse: ['horse_bay', 'horse', 'horse_white', 'horse_bay'],
+  unicorn: ['horse_white'], wolf: ['wolf'], donkey: ['donkey'], alpaca: ['alpaca'], llama: ['llama'], bull: ['bull'],
+  villager: ['man', 'woman4', 'woman1', 'man', 'woman1', 'woman4'], farmer: ['farmer'], baker: ['woman_dress'], child: ['woman3', 'man'], elder: ['woman2', 'adventurer'],
+  dragon: ['dragon'], babydragon: ['dragon'], trex: ['trex'], raptor: ['raptor'], trike: ['trike'], stego: ['stego'], bronto: ['bronto'],
+};
+// how big each one should be: body length for animals, standing height for people and birds
+const MODEL_FIT = {
+  rabbit: { len: 0.42 }, deer: { len: 1.6 }, sheep: { len: 1.25 }, fox: { len: 1.0 }, duck: { len: 0.5 }, cat: { len: 0.62 }, dog: { len: 0.95 },
+  chicken: { h: 0.5 }, pig: { len: 1.3 }, cow: { len: 2.3 }, horse: { len: 2.3 }, unicorn: { len: 2.3 }, wolf: { len: 1.4 }, donkey: { len: 1.9 },
+  alpaca: { len: 1.7 }, llama: { len: 1.8 }, bull: { len: 2.4 }, villager: { h: 1.75 }, farmer: { h: 1.75 }, baker: { h: 1.72 }, child: { h: 1.75 }, elder: { h: 1.7 },
+  dragon: { len: 6 }, babydragon: { len: 6 }, trex: { len: 7 }, raptor: { len: 2.2 }, trike: { len: 6 }, stego: { len: 6.5 }, bronto: { len: 14 },
+};
+// colour variants the files don't have, done by tinting
+const MODEL_TINT = { sheep: [null, [1.0, 0.95, 0.85], [0.3, 0.28, 0.27]], horse: [null, null, null, [0.28, 0.25, 0.24]], cat: [[1.25, 0.8, 0.5], null, [0.3, 0.3, 0.32], [1.2, 1.12, 1.0]] };
+const MODEL_YAW = {};
+const gltfLoader = new GLTFLoader(), modelCache = new Map();
+function loadModel(file) {
+  let m = modelCache.get(file);
+  if (m) return m;
+  m = { ready: false, cbs: [] };
+  modelCache.set(file, m);
+  gltfLoader.load(`assets/models/${file}.glb`, g => {
+    m.scene = g.scene; m.clips = g.animations;
+    g.scene.traverse(o => {
+      if (!o.isMesh) return;
+      o.castShadow = true; o.receiveShadow = true;
+      for (const mt of [].concat(o.material)) { if (mt.metalness !== undefined) { mt.metalness = Math.min(mt.metalness, 0.1); mt.roughness = Math.max(mt.roughness, 0.7); } }
+    });
+    g.scene.updateMatrixWorld(true);
+    g.scene.traverse(o => { if (o.isSkinnedMesh) o.skeleton.update(); });
+    m.box = new THREE.Box3().setFromObject(g.scene, true);
+    m.size = m.box.getSize(new V3()); m.center = m.box.getCenter(new V3());
+    // which way is it facing? rigged animals tell us by where the head bone sits
+    let head = null;
+    g.scene.traverse(o => { if (o.isBone && /head/i.test(o.name) && (!head || o.name.length < head.name.length)) head = o; });
+    if (head) {
+      const hp = head.getWorldPosition(new V3()), dx = hp.x - m.center.x, dz = hp.z - m.center.z;
+      if (Math.hypot(dx, dz) > Math.max(m.size.x, m.size.z) * 0.18) m.yaw = -Math.atan2(dx, dz);
+    }
+    m.ready = true;
+    for (const f of m.cbs.splice(0)) f(m);
+  }, undefined, e => { m.failed = true; console.warn('model failed', file, e); });
+  return m;
+}
+const modelFile = (type, v) => { const L = MODEL_FILES[type]; return L ? L[(v || 0) % L.length] : null; };
+const clipBase = c => c.name.split('|').pop();
+function pickClip(clips, re) {
+  const hits = clips.filter(c => re.test(clipBase(c)));
+  return hits.sort((a, b) => a.name.length - b.name.length)[0] || null;
+}
+function makeModelInstance(type, v, file, m) {
+  const root = SkeletonUtils.clone(m.scene), fit = MODEL_FIT[type] || { h: 1 };
+  const s = fit.h ? fit.h / m.size.y : fit.len / Math.max(m.size.x, m.size.z);
+  root.scale.setScalar(s);
+  root.position.set(-m.center.x * s, -m.box.min.y * s, -m.center.z * s);
+  const turn = new THREE.Group(), g = new THREE.Group();
+  turn.rotation.y = MODEL_YAW[file] ?? m.yaw ?? 0;
+  turn.add(root); g.add(turn);
+  const tint = MODEL_TINT[type]?.[v % (MODEL_TINT[type]?.length || 1)];
+  if (tint) root.traverse(o => { if (!o.isMesh) return; const f = mt => { const c = mt.clone(); c.color.multiply(new THREE.Color(...tint)); return c; }; o.material = Array.isArray(o.material) ? o.material.map(f) : f(o.material); });
+  if (type === 'unicorn') {
+    let head = null;
+    root.traverse(o => { if (!head && o.isBone && /head/i.test(o.name)) head = o; });
+    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.42, 14), new THREE.MeshStandardMaterial({ color: 0xf2d26a, roughness: 0.35, metalness: 0.3 }));
+    horn.castShadow = true;
+    if (head) {
+      head.updateWorldMatrix(true, false);
+      const k = 1 / head.getWorldScale(new V3()).x;
+      horn.scale.setScalar(k); horn.position.set(0, 0.25 * k, 0.12 * k); horn.rotation.x = 0.5;
+      head.add(horn);
+    }
+  }
+  const clips = m.clips, mixer = clips.length ? new THREE.AnimationMixer(root) : null;
+  const act = re => { const c = pickClip(clips, re); return c && mixer ? mixer.clipAction(c) : null; };
+  const acts = mixer ? {
+    idle: act(/(^|_)idle(_neutral)?$/i) || act(/idle/i), walk: act(/(^|_)walk(ing)?$/i), run: act(/(^|_)(run|running|gallop)$/i),
+    eat: act(/(eating|headlow)$/i), talk: act(/^(interact|.*_clapping)$/i) || act(/standing$/i), fly: act(/flying$/i),
+  } : {};
+  const meshes = [];
+  root.traverse(o => { if (o.isMesh) meshes.push(o); });
+  return { g, mixer, acts, cur: null, phase: Math.random() * 6, meshes, shadow: true, acc: 0 };
+}
+function attachModel(a, m, file) {
+  if (!animals.includes(a) || a.sleeper || a.model) return;
+  const inst = makeModelInstance(a.type, a.v, file, m);
+  a.g.clear(); a.g.add(inst.g);
+  a.head = null; a.legs = []; a.arms = []; a.wings = [];
+  a.model = inst;
+  a.g.traverse(o => { o.userData.animal = a; });
+}
+function wantModel(a) {
+  const file = !a.D.ghost && modelFile(a.type, a.v);
+  if (!file) return;
+  const m = loadModel(file);
+  if (m.ready) Promise.resolve().then(() => attachModel(a, m, file));
+  else m.cbs.push(mm => attachModel(a, mm, file));
+}
+// play the clip that fits what the creature is doing; models without walk cycles get a gentle trot bob instead
+function animateModel(a, dt, dp) {
+  const M = a.model, D = a.D, A = M.acts;
+  // only nearby creatures cast shadows, and distant ones animate at a lower rate
+  const near = dp < 26;
+  if (near !== M.shadow) { M.shadow = near; for (const m of M.meshes) m.castShadow = near; }
+  let want = A.idle;
+  if (A.fly && (D.flyer || !A.idle)) want = A.fly;
+  else if (a.speed > D.walk * 1.6 && (A.run || A.walk)) want = A.run || A.walk;
+  else if (a.speed > 0.15 && A.walk) want = A.walk;
+  else if (a.talkT > 0 && A.talk) want = A.talk;
+  else if (a.state === 'idle' && a.grazing && !D.person && A.eat) want = A.eat;
+  if (want && want !== M.cur) { want.reset().fadeIn(0.35).play(); if (M.cur) M.cur.fadeOut(0.35); M.cur = want; }
+  if (M.cur) M.cur.timeScale = M.cur === A.walk ? clamp(a.speed / Math.max(0.3, D.walk), 0.6, 1.8) : M.cur === A.run ? clamp(a.speed / Math.max(1, D.run), 0.7, 1.6) : 1;
+  M.acc += dt;
+  if (M.mixer && M.acc >= (dp < 25 ? 0 : dp < 55 ? 0.05 : 0.12)) { M.mixer.update(M.acc); M.acc = 0; }
+  if (a.speed > 0.15 && !(M.cur && (M.cur === A.walk || M.cur === A.run)) && !D.hop && a.state !== 'fly') {
+    M.phase += dt * a.speed * 9 / a.scale;
+    M.g.position.y = Math.abs(Math.sin(M.phase)) * 0.04 * a.scale;
+    M.g.rotation.z = Math.sin(M.phase) * 0.05;
+  } else { M.g.position.y *= 0.8; M.g.rotation.z *= 0.8; }
+}
 function spawnAnimal(type, x, z, v) {
   const D = ANIMALS[type];
   if (v === undefined) {
@@ -5129,6 +5274,7 @@ function spawnAnimal(type, x, z, v) {
   a.g.scale.setScalar(a.scale);
   a.g.traverse(o => { o.userData.animal = a; });
   if (D.ghost) a.g.traverse(o => { if (o.isMesh) { o.material = spiritMat; o.castShadow = false; } });
+  wantModel(a);
   animalsGroup.add(a.g);
   animals.push(a);
   return a;
@@ -5339,6 +5485,7 @@ function updateAnimals(dt) {
     }
     if (D.sound && !sleepy && dp < 30 && Math.random() < dt * (a.tame ? 0.02 : 0.05)) animalSound(D.sound, a);
     if (D.flyer && a.state === 'fly' && Math.random() < dt * 0.15) breathPuff(a);
+    if (a.model) animateModel(a, dt, dp);
     if (D.sparkle && Math.random() < dt * 1.5) burst(new V3(a.x + (Math.random() - 0.5) * 0.6, a.y + a.alt + (D.hover ? 0.1 : 1.2), a.z + (Math.random() - 0.5) * 0.6), 0xfff3a0, 1);
   }
   updateCritters(dt);
